@@ -74,7 +74,7 @@ SRCS            := $(APP_SRCS) $(BRIDGE_SRCS) $(ADAPTER_SRCS) $(COMMON_SRCS)
 OBJS            := $(SRCS:src/%.c=build/%.o)
 
 # --- Rules ------------------------------------------------------------------
-.PHONY: all clean
+.PHONY: all clean test
 
 all: build/$(TARGET).efi
 
@@ -93,3 +93,8 @@ build/$(TARGET).efi: build/$(TARGET).so
 
 clean:
 	rm -rf build
+
+# Layer 0 host unit tests (B2, B3, B4, O1) - no UEFI, no hardware, no OS.
+# See docs/architecture.md section 9, Layer 0.
+test:
+	$(MAKE) -C tests run

@@ -174,14 +174,20 @@ stream_put(UINT8 byte)
         g_ps2_stream.bytes[g_ps2_stream.count++] = byte;
 }
 
-/* Emit one key make/break sequence for a Set 1 scancode. */
+/* Emit one key make/break sequence for a Set 1 scancode.
+ *
+ * PS/2 Set 1 break codes are a single byte: (make | 0x80). For extended
+ * keys the 0xE0 prefix precedes the make or break byte. A break must NOT
+ * also emit the make byte - it is just the 0x80-OR'd code (optionally
+ * 0xE0-prefixed). */
 static void
 emit_key(UINT8 scancode, BOOLEAN extended, BOOLEAN make)
 {
     if (extended)
         stream_put(PS2_EXT_PREFIX);
-    stream_put(scancode);
-    if (!make)
+    if (make)
+        stream_put(scancode);
+    else
         stream_put((UINT8)(scancode | PS2_BREAK_BIT));
 }
 
