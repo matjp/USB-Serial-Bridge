@@ -196,6 +196,14 @@ typedef struct {
   If the bridge is healthy, the app proceeds to hand off to the OS. This is the primary
   (and on modern PCs, only) output channel — physical serial ports are gone, so ConOut
   is the surface.
+- **Fault-injection host test (`tests/test_xhci_fault.c`):** the real B1 driver
+  (`src/bridge/xhci.c`) is compiled on the host with a mock register file. Its register
+  accessors (`xhci_read32`/`xhci_write32`) and the topology/fault indirection points
+  (`usb_topology_get`/`xhci_fault_publish_rec`/`xhci_fault_get`) are weak symbols, so the
+  test overrides them to drive `bridge_poll_usb()` into real failure paths and assert the
+  fault record. It exercises the verify failure (spec < 1.0) and the reset failure
+  (USBSTS.HCH never set), and confirms a healthy controller produces no fault. This
+  verifies the new failure code end-to-end without hardware.
 
 ### 2.2 B2 — HID report parser (`src/bridge/hid_parser.c`)
 

@@ -27,6 +27,10 @@
 #include "usb_topology.h"
 #include "xhci_fault.h"
 
+/* Freestanding firmware: <efi.h> does not pull in <string.h>. Declare the
+ * libc memset we use to clear the fault record (host build provides it). */
+void *memset(void *s, int c, UINTN n);
+
 /* ------------------------------------------------------------------ */
 /* Raw HID report globals consumed by B2 (hid_parser.c).               */
 /*                                                                     */
@@ -203,17 +207,68 @@ static BOOLEAN g_xhci_fatal;
  * on core 0 can read it after the bridge halts. */
 static XHCI_FAULT g_xhci_fault_rec;
 
+/* One-time bring-up latch (file scope so the host test can reset it). */
+static BOOLEAN g_xhci_initialized = FALSE;
+
 /* ------------------------------------------------------------------ */
-/* Register access helpers.                                            */
+/* Weak indirection points for the host fault-injection test.          */
+/*                                                                     */
+/* The host test (tests/test_xhci_fault.c) overrides these to supply a */
+/* mock topology and to read the fault record WITHOUT touching the     */
+/* fixed reserved-region pointer slots (0x10000008 / 0x10000018),      */
+/* which are unmapped on the host. In the firmware build no strong     */
+/* definitions exist, so the real lookups/publish below are used.      */
 /* ------------------------------------------------------------------ */
 
-static inline UINT32
+/* Return the USB topology. Defaults to the reserved-region lookup. */
+__attribute__((weak)) const USB_TOPOLOGY *
+usb_topology_get(void)
+{
+    return usb_topology_lookup();
+}
+
+/* Publish the fault record. Defaults to the reserved-region publish. */
+__attribute__((weak)) void
+xhci_fault_publish_rec(void)
+{
+    xhci_fault_publish(&g_xhci_fault_rec);
+}
+
+/* Return the fault record (NULL if no fault). Defaults to the reserved-
+ * region lookup. */
+__attribute__((weak)) const XHCI_FAULT *
+xhci_fault_get(void)
+{
+    return &g_xhci_fault_rec;
+}
+
+/* Reset the bring-up latch and fault state. Used by the host fault-injection
+ * test to run multiple independent failure cases in one process. In the
+ * firmware build this is never called (the bridge runs once and halts). */
+__attribute__((weak)) void
+xhci_test_reset(void)
+{
+    g_xhci_fatal = FALSE;
+    g_xhci_initialized = FALSE;
+    memset(&g_xhci_fault_rec, 0, sizeof(g_xhci_fault_rec));
+}
+
+/* ------------------------------------------------------------------ */
+/* Register access helpers.                                            */
+/*                                                                     */
+/* These are weak so the host fault-injection test can override them   */
+/* with a mock register file (see tests/test_xhci_fault.c). In the     */
+/* firmware build no strong definition exists, so the real MMIO        */
+/* accessors below are used.                                           */
+/* ------------------------------------------------------------------ */
+
+__attribute__((weak)) UINT32
 xhci_read32(volatile UINT32 *reg)
 {
     return *reg;
 }
 
-static inline void
+__attribute__((weak)) void
 xhci_write32(volatile UINT32 *reg, UINT32 value)
 {
     *reg = value;
@@ -548,7 +603,6 @@ xhci_poll_transfer_event(XHCI *xhci, TRB *out)
 void
 bridge_poll_usb(void)
 {
-    static BOOLEAN initialized = FALSE;
     XHCI xhci;
     const USB_TOPOLOGY *topo;
     TRB evt;
@@ -559,7 +613,7 @@ bridge_poll_usb(void)
     if (g_xhci_fatal)
         return;
 
-    topo = usb_topology_lookup();
+    topo = usb_topology_get();
     if (topo == NULL) {
         xhci_fault(NULL, XHCI_STAGE_NONE, XHCI_FAULT_HINT_NONE);
         return;
@@ -568,11 +622,11 @@ bridge_poll_usb(void)
     xhci_init(&xhci, topo);
 
     /* Publish the fault record once so the harness can read it after a halt. */
-    xhci_fault_publish(&g_xhci_fault_rec);
+    xhci_fault_publish_rec();
 
     /* One-time controller bring-up. Each stage records its own fault so the
      * harness can report exactly where the UEFI->XHCI handoff failed. */
-    if (!initialized) {
+    if (!g_xhci_initialized) {
         /* Belt-and-suspenders XHCI >= 1.0 check (C6). */
         if (!xhci_verify_version(&xhci)) {
             xhci_fault(&xhci, XHCI_STAGE_VERIFY, XHCI_FAULT_HINT_VERIFY);
@@ -608,7 +662,7 @@ bridge_poll_usb(void)
         xhci_ring_endpoint_doorbell(&xhci, topo->mouse.endpoint, 2);
         g_xhci_fault_rec.doorbell = 2 * (topo->mouse.endpoint & 0x0F) + 1;
 
-        initialized = TRUE;
+        g_xhci_initialized = TRUE;
     }
 
     /* Poll the event ring for completed transfers. */

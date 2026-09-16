@@ -428,6 +428,12 @@ design is proven before it.
   diagnosis (stage, hint, `USBSTS`/`USBCMD`/`CRCR`) to the console and halts — it never
   boots the OS. The output fits the UEFI-guaranteed 80×25 console (mode 0), so it stays
   on one screen. If the bridge is healthy, the app proceeds to hand off to the OS.
+- **Fault-injection host test (`tests/test_xhci_fault.c`):** the real B1 driver is
+  compiled on the host with a mock register file. Its register accessors and the
+  topology/fault indirection points are weak symbols, so the test overrides them to drive
+  `bridge_poll_usb()` into real failure paths (verify spec < 1.0; reset USBSTS.HCH never
+  set) and asserts the fault record — a one-shot verification of the new failure code
+  without hardware. A healthy-controller case confirms no fault is raised.
 - This covers B1, B2, B3, B4, B5, U1, U2, U3, and O1 — the entire bridge and boot-time
   path — without an OS, on both QEMU and real hardware.
 

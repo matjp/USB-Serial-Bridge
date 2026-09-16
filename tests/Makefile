@@ -60,9 +60,14 @@ TARGET_L2 := build/test_layer2
 # transport (src/bridge/xhci_fault.h) on the host. Hardware-independent.
 TARGET_L1F := build/test_layer1_fault
 
+# --- XHCI fault-injection one-shot: compiles the REAL B1 driver
+# (src/bridge/xhci.c) on the host with a mock register file and drives
+# bridge_poll_usb() into real failure paths. Verifies the new fault code.
+TARGET_XF := build/test_xhci_fault
+
 .PHONY: all run clean
 
-all: $(TARGET) $(TARGET_L2) $(TARGET_L1F)
+all: $(TARGET) $(TARGET_L2) $(TARGET_L1F) $(TARGET_XF)
 
 $(TARGET): $(OBJS) build/test_layer0.o
 	$(CC) $(CFLAGS) -o $@ $^
@@ -71,6 +76,9 @@ $(TARGET_L2): $(OBJS_L2) build/test_layer2.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TARGET_L1F): build/test_layer1_fault.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET_XF): build/xhci.o build/test_xhci_fault.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 build/%.o: ../src/%.c
@@ -93,10 +101,21 @@ build/test_layer1_fault.o: test_layer1_fault.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+build/test_xhci_fault.o: test_xhci_fault.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+# xhci.c is the real B1 driver. On the host it is compiled with the mock
+# register-file overrides from test_xhci_fault.c (weak symbols).
+build/xhci.o: ../src/bridge/xhci.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 run: all
 	./$(TARGET)
 	./$(TARGET_L2)
 	./$(TARGET_L1F)
+	./$(TARGET_XF)
 
 clean:
 	rm -rf build

@@ -18,6 +18,11 @@
 #define EFI_SHIM_H
 
 #include <stdint.h>
+#include <stddef.h>   /* NULL */
+
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
 
 /* GNU-EFI base types (subset used by Layer 0 modules). */
 typedef uint8_t   UINT8;
