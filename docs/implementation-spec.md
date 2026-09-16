@@ -161,6 +161,35 @@ typedef struct {
 - No interrupts — poll the event ring in `bridge_poll_usb()`.
 - No enumeration, no hotplug — fixed topology from U1.
 
+**Debugging model (UEFI → XHCI handoff):** The controller is handed off from UEFI in
+an unknown, partially-configured state, so re-configuring it is the most failure-prone
+part of the design. A bare "fatal" flag is not debuggable. B1 therefore records a
+**structured fault record** (`src/bridge/xhci_fault.h`) in the reserved region, published
+so the Layer 1 harness on core 0 can read it after the bridge halts:
+```c
+typedef struct {
+    UINT32 magic;           /* XHCI_FAULT_MAGIC sanity check */
+    UINT32 stage;           /* XHCI_STAGE_* where bring-up stopped */
+    UINT32 hint;            /* XHCI_FAULT_HINT_* for the readout */
+    UINT32 usbsts;          /* USBSTS register at failure */
+    UINT32 usbcmd;          /* USBCMD register at failure */
+    UINT32 crcr;            /* CRCR register at failure */
+    UINT32 last_cc;         /* last completion code seen (poll stage) */
+    UINT32 last_trb_type;   /* last TRB type seen (poll stage) */
+    UINT32 doorbell;        /* last doorbell value written */
+    UINT32 reserved[7];
+} XHCI_FAULT;
+```
+- **Staged bring-up:** each handoff step records its own `stage` (verify, reset, rings,
+  devices, transfer, run, doorbell, poll) so the fault record says exactly where
+  bring-up stopped.
+- **Register snapshot:** on a fatal fault, B1 snapshots `USBSTS`/`USBCMD`/`CRCR` so the
+  harness can report what the controller said.
+- **Poll-stage errors:** a non-success completion code is recorded (stage = poll) but
+  does NOT halt the bridge — a transient error on one endpoint should not kill the
+  whole bridge.
+- The harness prints a human-readable diagnosis from the record (stage + hint + regs).
+
 ### 2.2 B2 — HID report parser (`src/bridge/hid_parser.c`)
 
 **Responsibility:** Parse the raw boot-protocol reports from B1 into normalized events.

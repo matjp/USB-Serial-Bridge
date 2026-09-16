@@ -411,6 +411,16 @@ design is proven before it.
   XHCI controller, real USB devices, real SIPI bring-up, and real multi-core TDM, none
   of which QEMU fully models. The harness on core 0 drains the mailbox and asserts the
   byte stream, exactly as in QEMU, but against real hardware.
+- **UEFI → XHCI handoff (dedicated first test):** the bridge takes over the XHCI
+  controller from UEFI in an unknown, partially-configured state. Re-configuring it
+  (reset, rings, device contexts, doorbells) is the most failure-prone step, so the
+  harness's first test case is specifically the handoff: it verifies the bridge reset
+  the controller, re-established the device/endpoint context, and successfully polls
+  the two endpoints. B1 records a **structured fault record** (`src/bridge/xhci_fault.h`)
+  — stage, register snapshot (`USBSTS`/`USBCMD`/`CRCR`), completion code — so a handoff
+  failure is diagnosed precisely (which step, what the controller said) rather than as
+  a generic halt. This is where the open item (root-hub port number not recorded by U1)
+  is confirmed/fixed on real hardware.
 - This covers B1, B2, B3, B4, B5, U1, U2, U3, and O1 — the entire bridge and boot-time
   path — without an OS, on both QEMU and real hardware.
 

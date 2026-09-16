@@ -25,6 +25,7 @@
 
 #include "bridge.h"
 #include "usb_topology.h"
+#include "xhci_fault.h"
 
 /* ------------------------------------------------------------------ */
 /* Raw HID report globals consumed by B2 (hid_parser.c).               */
@@ -196,6 +197,12 @@ static UINT8 g_mouse_buf[HID_MOUSE_REPORT_SIZE];
 /* Fatal-fault flag: set when the controller is unusable; the bridge halts. */
 static BOOLEAN g_xhci_fatal;
 
+/* Debugging model: a structured fault record (see xhci_fault.h) that records
+ * WHICH bring-up stage failed, WHAT the controller reported, and WHAT the
+ * bridge was doing. Published in the reserved region so the Layer 1 harness
+ * on core 0 can read it after the bridge halts. */
+static XHCI_FAULT g_xhci_fault_rec;
+
 /* ------------------------------------------------------------------ */
 /* Register access helpers.                                            */
 /* ------------------------------------------------------------------ */
@@ -210,6 +217,24 @@ static inline void
 xhci_write32(volatile UINT32 *reg, UINT32 value)
 {
     *reg = value;
+}
+
+/* Record a fatal fault at the given stage with the current controller state.
+ * Sets g_xhci_fatal and fills the fault record for the harness readout. */
+static void
+xhci_fault(XHCI *xhci, UINT32 stage, UINT32 hint)
+{
+    g_xhci_fatal = TRUE;
+
+    g_xhci_fault_rec.magic         = XHCI_FAULT_MAGIC;
+    g_xhci_fault_rec.stage         = stage;
+    g_xhci_fault_rec.hint          = hint;
+    g_xhci_fault_rec.usbsts        = xhci ? xhci_read32(&xhci->op[XHCI_OP_USBSTS / 4]) : 0;
+    g_xhci_fault_rec.usbcmd        = xhci ? xhci_read32(&xhci->op[XHCI_OP_USBCMD / 4]) : 0;
+    g_xhci_fault_rec.crcr          = xhci ? xhci_read32(&xhci->op[XHCI_OP_CRCR / 4]) : 0;
+    g_xhci_fault_rec.last_cc       = 0;
+    g_xhci_fault_rec.last_trb_type = 0;
+    g_xhci_fault_rec.doorbell      = 0;
 }
 
 /* Poll a register until a bit is set (returns TRUE) or a timeout elapses. */
@@ -536,27 +561,31 @@ bridge_poll_usb(void)
 
     topo = usb_topology_lookup();
     if (topo == NULL) {
-        g_xhci_fatal = TRUE;
+        xhci_fault(NULL, XHCI_STAGE_NONE, XHCI_FAULT_HINT_NONE);
         return;
     }
 
     xhci_init(&xhci, topo);
 
-    /* One-time controller bring-up. */
+    /* Publish the fault record once so the harness can read it after a halt. */
+    xhci_fault_publish(&g_xhci_fault_rec);
+
+    /* One-time controller bring-up. Each stage records its own fault so the
+     * harness can report exactly where the UEFI->XHCI handoff failed. */
     if (!initialized) {
         /* Belt-and-suspenders XHCI >= 1.0 check (C6). */
         if (!xhci_verify_version(&xhci)) {
-            g_xhci_fatal = TRUE;
+            xhci_fault(&xhci, XHCI_STAGE_VERIFY, XHCI_FAULT_HINT_VERIFY);
             return;
         }
 
         if (!xhci_reset(&xhci)) {
-            g_xhci_fatal = TRUE;
+            xhci_fault(&xhci, XHCI_STAGE_RESET, XHCI_FAULT_HINT_RESET_TIMEOUT);
             return;
         }
 
         if (!xhci_setup_rings(&xhci)) {
-            g_xhci_fatal = TRUE;
+            xhci_fault(&xhci, XHCI_STAGE_RINGS, XHCI_FAULT_HINT_RING_SETUP);
             return;
         }
 
@@ -568,10 +597,16 @@ bridge_poll_usb(void)
 
         /* Start the controller (RUN). */
         xhci_write32(&xhci.op[XHCI_OP_USBCMD / 4], USBCMD_RUN);
+        if (!xhci_wait_bit_clear(&xhci.op[XHCI_OP_USBSTS / 4], USBSTS_HCH,
+                                 1000000)) {
+            xhci_fault(&xhci, XHCI_STAGE_RUN, XHCI_FAULT_HINT_RUN);
+            return;
+        }
 
         /* Ring the doorbells to start the periodic IN transfers. */
         xhci_ring_endpoint_doorbell(&xhci, topo->kbd.endpoint, 1);
         xhci_ring_endpoint_doorbell(&xhci, topo->mouse.endpoint, 2);
+        g_xhci_fault_rec.doorbell = 2 * (topo->mouse.endpoint & 0x0F) + 1;
 
         initialized = TRUE;
     }
@@ -579,8 +614,16 @@ bridge_poll_usb(void)
     /* Poll the event ring for completed transfers. */
     while (xhci_poll_transfer_event(&xhci, &evt)) {
         cc = (evt.field3 >> 24) & 0xFF;
-        if (cc != CC_SUCCESS && cc != CC_SHORT_PACKET)
-            continue;   /* ignore errors for now */
+        g_xhci_fault_rec.last_cc       = cc;
+        g_xhci_fault_rec.last_trb_type = (evt.field3 >> 6) & 0x3F;
+
+        if (cc != CC_SUCCESS && cc != CC_SHORT_PACKET) {
+            /* Record the poll-stage fault but keep polling (a transient
+             * error on one endpoint should not halt the whole bridge). */
+            g_xhci_fault_rec.stage = XHCI_STAGE_POLL;
+            g_xhci_fault_rec.hint  = XHCI_FAULT_HINT_POLL;
+            continue;
+        }
 
         /* Identify which endpoint completed by matching the TRB pointer. */
         trb_ptr = ((UINT64)evt.field1 << 32) | evt.field0;
