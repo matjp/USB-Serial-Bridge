@@ -29,6 +29,15 @@ void bridge_translate_ps2(void);
 /* B4: Write the PS/2 byte streams to the two mailboxes (kbd + mouse). */
 void bridge_write_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
 
+/* B4 (virtual-port variant): Write the PS/2 byte streams to the virtual
+ * 8042 port region (see include/virtual_ps2.h). One byte per call, 8042
+ * single-output-buffer semantics. */
+void bridge_write_virtual_ps2(void);
+
+/* B4 (virtual-port variant): Reset the writer's internal write cursors.
+ * Used by host tests between cases. */
+void bridge_virtual_ps2_reset(void);
+
 /* B5: Bridge core entry point (called after SIPI bring-up). */
 void bridge_entry(void);
 

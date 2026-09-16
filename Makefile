@@ -63,6 +63,7 @@ BRIDGE_SRCS     := src/bridge/xhci.c \
                    src/bridge/hid_parser.c \
                    src/bridge/hid_ps2.c \
                    src/bridge/mailbox_writer.c \
+                   src/bridge/virtual_ps2_writer.c \
                    src/bridge/bridge_entry.c \
                    src/bridge/tdm.c
 

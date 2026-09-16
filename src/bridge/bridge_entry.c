@@ -15,7 +15,6 @@
  */
 
 #include <efi.h>
-#include <mailbox.h>
 
 #include "bridge.h"
 #include "tdm.h"
@@ -23,9 +22,6 @@
 void
 bridge_entry(void)
 {
-    MAILBOX *kbd_mb   = mailbox_lookup_kbd();
-    MAILBOX *mouse_mb = mailbox_lookup_mouse();
-
     for (;;) {
         /* If the USB controller is unusable (non-XHCI>=1.0 or a fatal
          * fault), halt cleanly in an idle loop. */
@@ -41,8 +37,9 @@ bridge_entry(void)
         bridge_parse_hid();
         bridge_translate_ps2();
 
-        /* Write the byte streams to the two mailboxes (B4). */
-        bridge_write_mailbox(kbd_mb, mouse_mb);
+        /* Write the byte streams to the virtual 8042 port region (B4,
+         * virtual-port variant). One byte per poll, 8042 semantics. */
+        bridge_write_virtual_ps2();
 
         /* TDM handshake: yield the core back to the OS background task
          * until the next bridge time slice. The timer ISR on this core

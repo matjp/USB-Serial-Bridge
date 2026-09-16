@@ -35,6 +35,7 @@ SRCS := \
 	../src/bridge/hid_parser.c \
 	../src/bridge/hid_ps2.c \
 	../src/bridge/mailbox_writer.c \
+	../src/bridge/virtual_ps2_writer.c \
 	../src/adapter/mailbox_reader.c \
 	../src/common/mailbox.c \
 	b1_stub.c
@@ -65,9 +66,14 @@ TARGET_L1F := build/test_layer1_fault
 # bridge_poll_usb() into real failure paths. Verifies the new fault code.
 TARGET_XF := build/test_xhci_fault
 
+# --- Virtual 8042 port writer test: exercises B4 (virtual-port variant,
+# src/bridge/virtual_ps2_writer.c) against a mock register file that
+# overrides the weak accessors. Hardware-independent.
+TARGET_VP := build/test_virtual_ps2
+
 .PHONY: all run clean
 
-all: $(TARGET) $(TARGET_L2) $(TARGET_L1F) $(TARGET_XF)
+all: $(TARGET) $(TARGET_L2) $(TARGET_L1F) $(TARGET_XF) $(TARGET_VP)
 
 $(TARGET): $(OBJS) build/test_layer0.o
 	$(CC) $(CFLAGS) -o $@ $^
@@ -79,6 +85,9 @@ $(TARGET_L1F): build/test_layer1_fault.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TARGET_XF): build/xhci.o build/test_xhci_fault.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET_VP): build/bridge/virtual_ps2_writer.o build/bridge/hid_parser.o build/bridge/hid_ps2.o build/b1_stub.o build/test_virtual_ps2.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 build/%.o: ../src/%.c
@@ -105,6 +114,10 @@ build/test_xhci_fault.o: test_xhci_fault.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+build/test_virtual_ps2.o: test_virtual_ps2.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 # xhci.c is the real B1 driver. On the host it is compiled with the mock
 # register-file overrides from test_xhci_fault.c (weak symbols).
 build/xhci.o: ../src/bridge/xhci.c
@@ -116,6 +129,7 @@ run: all
 	./$(TARGET_L2)
 	./$(TARGET_L1F)
 	./$(TARGET_XF)
+	./$(TARGET_VP)
 
 clean:
 	rm -rf build
