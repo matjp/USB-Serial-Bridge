@@ -3,15 +3,14 @@
  *
  * The bridge runs on the highest core, TDM-shared with the OS's background
  * task. It drives the two pre-discovered low/full-speed interrupt endpoints,
- * translates HID -> virtual PS/2, and writes the byte stream to the mailbox.
- * See docs/architecture.md section 7.1.
+ * translates HID -> virtual PS/2, and writes the byte stream to the virtual
+ * 8042 port region. See docs/architecture.md section 7.1.
  */
 
 #ifndef BRIDGE_H
 #define BRIDGE_H
 
 #include <efi.h>
-#include <mailbox.h>
 
 /* B1: Poll the two interrupt IN endpoints, produce raw HID reports. */
 void bridge_poll_usb(void);
@@ -26,16 +25,13 @@ void bridge_parse_hid(void);
 /* B3: Translate HID events into PS/2 Set 1 + mouse packets. */
 void bridge_translate_ps2(void);
 
-/* B4: Write the PS/2 byte streams to the two mailboxes (kbd + mouse). */
-void bridge_write_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
-
-/* B4 (virtual-port variant): Write the PS/2 byte streams to the virtual
- * 8042 port region (see include/virtual_ps2.h). One byte per call, 8042
- * single-output-buffer semantics. */
+/* B4: Write the PS/2 byte streams to the virtual 8042 port region (see
+ * include/virtual_ps2.h). One byte per call, 8042 single-output-buffer
+ * semantics. */
 void bridge_write_virtual_ps2(void);
 
-/* B4 (virtual-port variant): Reset the writer's internal write cursors.
- * Used by host tests between cases. */
+/* B4: Reset the writer's internal write cursors. Used by host tests
+ * between cases. */
 void bridge_virtual_ps2_reset(void);
 
 /* B5: Bridge core entry point (called after SIPI bring-up). */

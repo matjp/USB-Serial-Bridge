@@ -5,7 +5,7 @@
  * This is an INTERNAL header, not part of the public ABI. It defines the
  * normalized HID event queue produced by B2 (hid_parser.c) and consumed by
  * B3 (hid_ps2.c), and the PS/2 output stream produced by B3 and consumed by
- * B4 (mailbox_writer.c).
+ * B4 (virtual_ps2_writer.c).
  *
  * The queue/stream objects themselves are defined (file-local) in their
  * producing translation unit and exposed here via extern so the consuming
@@ -46,8 +46,9 @@ extern HID_EVENT_QUEUE g_hid_events;
 
 /* Internal PS/2 output streams produced by B3, consumed by B4.
  *
- * The keyboard and mouse are kept on SEPARATE streams (and, downstream, on
- * separate mailbox rings) so the two byte streams are never ambiguous. */
+ * The keyboard and mouse are kept on SEPARATE streams so the two byte
+ * streams are never ambiguous (the bridge prioritizes keyboard over mouse
+ * when writing the single virtual data slot). */
 #define PS2_STREAM_MAX 32
 
 typedef struct {

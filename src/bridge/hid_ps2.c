@@ -163,8 +163,9 @@ static const PS2_MOD_MAP g_ps2_mods[] = {
 };
 
 /* Internal PS/2 output streams consumed by B4. Keyboard and mouse are kept
- * on separate streams (and, downstream, on separate mailbox rings) so the
- * two byte streams are never ambiguous. */
+ * on separate streams so the two byte streams are never ambiguous (the
+ * bridge prioritizes keyboard over mouse when writing the single virtual
+ * data slot). */
 PS2_STREAM g_ps2_kbd_stream;
 PS2_STREAM g_ps2_mouse_stream;
 

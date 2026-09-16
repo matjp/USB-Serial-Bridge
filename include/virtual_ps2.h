@@ -40,7 +40,7 @@
 #include <efi.h>
 
 /* Fixed physical address of the virtual 8042 port region. Placed in the
- * reserved region, clear of the mailbox/topology/fault/status pointer slots
+ * reserved region, clear of the topology/fault/status pointer slots
  * (0x10000000..0x10000028). The OS must map this address (identity-mapped
  * OSes see it directly; others carve it out of their memory map). */
 #define VIRTUAL_PS2_BASE    0x10000030u

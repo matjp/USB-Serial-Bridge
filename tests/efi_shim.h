@@ -9,9 +9,10 @@
  * the firmware build. The real types come from /usr/include/efi/ at build
  * time; this file just mirrors the subset the Layer 0 modules use.
  *
- * The mailbox uses an x86 mfence for producer ordering. On the host we
- * compile for x86-64, so the same inline asm is valid; we keep it identical
- * to the firmware so the test exercises the real ordering primitive.
+ * The virtual 8042 port producer (B4) uses an x86 mfence for ordering. On
+ * the host we compile for x86-64, so the same inline asm is valid; we keep
+ * it identical to the firmware so the test exercises the real ordering
+ * primitive.
  */
 
 #ifndef EFI_SHIM_H
@@ -59,8 +60,9 @@ typedef uint16_t CHAR16;
 #define EFIAPI
 #endif
 
-/* The mailbox producer uses an x86 mfence. Keep it identical to the
- * firmware so the host test exercises the real ordering primitive. */
+/* The virtual 8042 port producer (B4) uses an x86 mfence. Keep it
+ * identical to the firmware so the host test exercises the real ordering
+ * primitive. */
 #ifndef __GNUC__
 #error "efi_shim.h requires GCC/Clang for the mfence inline asm"
 #endif

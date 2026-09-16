@@ -19,7 +19,7 @@
 - **Build:** `make -C /workspaces/USB-Serial-Bridge` produces `build/bridge.efi`.
   All sources are already wired into the Makefile. **Do not add new source files to the
   build** unless you also update `Makefile` `*_SRCS` and re-verify.
-- **Existing headers are authoritative.** `include/mailbox.h`, `include/hid.h`,
+- **Existing headers are authoritative.** `include/hid.h`,
   `include/ps2.h`, `include/virtual_ps2.h` are the ABI. Do not change their public
   layout or the virtual-port byte-stream semantics (§6 of architecture.md). You may add
   internal-only helpers.

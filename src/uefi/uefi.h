@@ -9,7 +9,6 @@
 #define UEFI_H
 
 #include <efi.h>
-#include <mailbox.h>
 
 /* U1: Verify the host controller is XHCI >= 1.0 (C6). */
 EFI_STATUS uefi_verify_xhci(void);
@@ -17,9 +16,8 @@ EFI_STATUS uefi_verify_xhci(void);
 /* U1: Enumerate the single USB keyboard and mouse, record endpoints. */
 EFI_STATUS uefi_discover_usb(void);
 
-/* U3: Allocate + reserve the bridge and mailbox regions. */
-EFI_STATUS uefi_reserve_memory(MAILBOX **out_kbd_mailbox,
-                               MAILBOX **out_mouse_mailbox);
+/* U3: Allocate + reserve the bridge, virtual port, and topology regions. */
+EFI_STATUS uefi_reserve_memory(void);
 
 /* U2: Bring up the highest core via SIPI, loading the bridge code. */
 EFI_STATUS uefi_bringup_highest_core(void);

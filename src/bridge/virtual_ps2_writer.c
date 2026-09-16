@@ -1,10 +1,10 @@
 /*
- * virtual_ps2_writer.c - B4 (virtual-port variant): 8042-style producer.
+ * virtual_ps2_writer.c - B4: 8042-style producer.
  *
  * Writes the translated PS/2 byte streams into the virtual 8042 port region
- * (see include/virtual_ps2.h) instead of the mailbox rings. This is the
- * bridge-side half of the "virtual ports" design: the OS reads the virtual
- * status/data registers directly, so no per-OS mailbox adapter is needed.
+ * (see include/virtual_ps2.h). This is the bridge-side half of the "virtual
+ * ports" design: the OS reads the virtual status/data registers directly, so
+ * no per-OS mailbox adapter is needed.
  *
  * Faithful 8042 semantics:
  *   - ONE byte in flight at a time (single data register, mirrors the 8042's

@@ -9,9 +9,9 @@
  * address space (no memory protection).
  *
  * Slot length: 2 ms (see TDM_SLOT_US). This gives the bridge enough time to
- * poll the two USB interrupt endpoints and drain into the mailbox each slot,
- * while leaving the OS background task the majority of the core. See
- * docs/implementation-spec.md section 5.
+ * poll the two USB interrupt endpoints and write into the virtual port
+ * region each slot, while leaving the OS background task the majority of the
+ * core. See docs/implementation-spec.md section 5.
  */
 
 #ifndef TDM_H

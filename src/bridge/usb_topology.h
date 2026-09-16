@@ -16,9 +16,9 @@
 #include <efi.h>
 
 /* Fixed physical address where U3 publishes the USB_TOPOLOGY base address.
- * Chosen to sit just above the mailbox pointer slot (0x10000000, see
- * src/common/mailbox.c) in the reserved region. The OS never allocates over
- * this fixed pointer page (it is reserved by U3). */
+ * Chosen to sit in the reserved pointer page (0x10000000..0x10000028) in
+ * the reserved region. The OS never allocates over this fixed pointer page
+ * (it is reserved by U3). */
 #define USB_TOPOLOGY_PTR_ADDR  0x10000008ULL
 
 /* One pre-discovered interrupt IN endpoint. */

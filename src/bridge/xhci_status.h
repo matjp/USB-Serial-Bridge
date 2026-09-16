@@ -8,11 +8,10 @@
  * record is filled and published by B1 only in BRIDGE_DEBUG builds, and
  * printed by the Layer 1 harness on core 0.
  *
- * It lives in the reserved region (published like the mailbox/topology/
- * fault records) so the harness can read it after the bridge runs. The
- * pointer slot is the next free 8-byte slot in the reserved pointer page,
- * clear of the mailbox (0x10000000 / 0x10000010), topology (0x10000008)
- * and fault (0x10000018) pointers.
+ * It lives in the reserved region (published like the topology/fault
+ * records) so the harness can read it after the bridge runs. The pointer
+ * slot is the next free 8-byte slot in the reserved pointer page, clear of
+ * the topology (0x10000008) and fault (0x10000018) pointers.
  */
 
 #ifndef XHCI_STATUS_H

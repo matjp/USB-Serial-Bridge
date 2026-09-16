@@ -6,9 +6,10 @@
  * slice, then yields the core back to the OS task.
  *
  * The bridge polls the two interrupt IN endpoints (B1), parses HID (B2),
- * translates to PS/2 (B3), and drains the byte stream into the mailbox (B4)
- * within its 2 ms time slice. It then yields the core back to the OS task
- * via the TDM handshake (tdm_switch_to_os) until the next bridge time slice.
+ * translates to PS/2 (B3), and writes the byte stream into the virtual 8042
+ * port region (B4) within its 2 ms time slice. It then yields the core back
+ * to the OS task via the TDM handshake (tdm_switch_to_os) until the next
+ * bridge time slice.
  *
  * If B1 detects a non-XHCI>=1.0 controller or a fatal fault, the bridge
  * halts cleanly in an idle loop instead of spinning on a dead controller.

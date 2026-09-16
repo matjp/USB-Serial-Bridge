@@ -1,22 +1,20 @@
 /*
- * adapter.h - Internal interface for the per-OS input adapter (Phase 2).
+ * adapter.h - Internal interface for the per-OS input read (Phase 2).
  *
- * The adapter runs on core 0 inside the OS. It drains the mailbox (O1) and
- * injects the virtual PS/2 byte stream into the OS's existing input path
- * (O2). The OS reuses its existing Set 1 decoder and 3-byte mouse-packet
- * parser unchanged. See docs/architecture.md section 7.2.
+ * The OS's PS/2 driver reads the virtual 8042 port region (O1) and feeds the
+ * virtual PS/2 byte stream into the OS's existing input path. The OS reuses
+ * its existing Set 1 decoder and 3-byte mouse-packet parser unchanged. See
+ * docs/architecture.md section 7.2.
  */
 
 #ifndef ADAPTER_H
 #define ADAPTER_H
 
 #include <efi.h>
-#include <mailbox.h>
+#include <virtual_ps2.h>
 
-/* O1: Drain the two mailboxes, produce the virtual PS/2 byte streams. */
-void adapter_drain_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
-
-/* O2: Inject the virtual PS/2 byte streams into the OS input path. */
-void adapter_inject_input(void);
+/* O1: Read the virtual 8042 port region (status/data, read-and-clear) and
+ * feed the byte to the OS's existing KBD/mouse handler. */
+void adapter_read_virtual_ps2(void);
 
 #endif /* ADAPTER_H */

@@ -7,9 +7,10 @@
  * bare "fatal" flag is not debuggable - we need to know WHICH step failed,
  * WHAT the controller reported, and WHAT the bridge was doing.
  *
- * This record lives in the reserved region (published like the mailbox) so
- * the Layer 1 harness on core 0 can read it after the bridge halts and print
- * a human-readable diagnosis. See docs/architecture.md section 9, Layer 1.
+ * This record lives in the reserved region (published like the topology and
+ * status records) so the Layer 1 harness on core 0 can read it after the
+ * bridge halts and print a human-readable diagnosis. See docs/architecture.md
+ * section 9, Layer 1.
  */
 
 #ifndef XHCI_FAULT_H
@@ -18,8 +19,8 @@
 #include <efi.h>
 
 /* Fixed physical address where the bridge publishes the XHCI_FAULT record.
- * Chosen to sit in the reserved region, clear of the mailbox pointer slots
- * (0x10000000 / 0x10000010) and the USB_TOPOLOGY pointer (0x10000008). */
+ * Chosen to sit in the reserved pointer page, clear of the USB_TOPOLOGY
+ * pointer (0x10000008). */
 #define XHCI_FAULT_PTR_ADDR  0x10000018ULL
 
 /* Bring-up stages. Each handoff step records its own stage so the fault

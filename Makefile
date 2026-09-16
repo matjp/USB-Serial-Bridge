@@ -1,4 +1,4 @@
-# GNU-EFI build for the USB HID -> Polled Mailbox Bridge
+# GNU-EFI build for the USB HID -> Virtual 8042 Port Bridge
 # Target: x86_64 UEFI application (PE32+)
 #
 # Produces:
@@ -62,19 +62,11 @@ APP_SRCS        := src/main.c \
 BRIDGE_SRCS     := src/bridge/xhci.c \
                    src/bridge/hid_parser.c \
                    src/bridge/hid_ps2.c \
-                   src/bridge/mailbox_writer.c \
                    src/bridge/virtual_ps2_writer.c \
                    src/bridge/bridge_entry.c \
                    src/bridge/tdm.c
 
-# Input adapter (per-OS): O1-O2
-ADAPTER_SRCS    := src/adapter/mailbox_reader.c \
-                   src/adapter/input_inject.c
-
-# Shared logic used by both app and bridge
-COMMON_SRCS     := src/common/mailbox.c
-
-SRCS            := $(APP_SRCS) $(BRIDGE_SRCS) $(ADAPTER_SRCS) $(COMMON_SRCS)
+SRCS            := $(APP_SRCS) $(BRIDGE_SRCS)
 OBJS            := $(SRCS:src/%.c=build/%.o)
 
 # --- Rules ------------------------------------------------------------------

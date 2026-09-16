@@ -1,9 +1,9 @@
 /*
- * mem_reserve.c - U3: Bridge + mailbox memory reservation.
+ * mem_reserve.c - U3: Bridge + virtual port memory reservation.
  *
- * Allocates and reserves the bridge code region and the mailbox region so
- * the OS does not reuse them. Because an OS that boots via its own BIOS
- * bootloader collects E820 (not the UEFI memory map), an
+ * Allocates and reserves the bridge code region and the virtual 8042 port
+ * region so the OS does not reuse them. Because an OS that boots via its own
+ * BIOS bootloader collects E820 (not the UEFI memory map), an
  * EFI_RESERVED_MEMORY_TYPE entry alone is NOT sufficient - the region must
  * also be carved out of E820 or placed above the OS's physical memory space.
  *
@@ -14,7 +14,7 @@
 #include <efi.h>
 #include <efilib.h>
 
-#include <mailbox.h>
+#include <virtual_ps2.h>
 #include "uefi.h"
 #include "../bridge/usb_topology.h"
 
@@ -44,7 +44,7 @@ extern USB_TOPOLOGY g_usb_topology;
  * implement the high-placement strategy: walk the EFI memory map, find
  * the highest conventional-memory region, and allocate the reserved pages
  * at the very top of it (via AllocateMaxAddress). This places the
- * bridge/mailbox/topology above the bulk of the OS's physical memory. */
+ * bridge/topology above the bulk of the OS's physical memory. */
 /* ------------------------------------------------------------------ */
 static EFI_STATUS
 allocate_reserved_pages_high(UINTN pages, EFI_PHYSICAL_ADDRESS *out)
@@ -107,41 +107,24 @@ allocate_reserved_pages_high(UINTN pages, EFI_PHYSICAL_ADDRESS *out)
 }
 
 EFI_STATUS
-uefi_reserve_memory(MAILBOX **out_kbd_mailbox, MAILBOX **out_mouse_mailbox)
+uefi_reserve_memory(void)
 {
     EFI_STATUS status;
-    EFI_PHYSICAL_ADDRESS kbd_mailbox_addr = 0;
-    EFI_PHYSICAL_ADDRESS mouse_mailbox_addr = 0;
     EFI_PHYSICAL_ADDRESS bridge_addr = 0;
     EFI_PHYSICAL_ADDRESS topo_addr = 0;
-    MAILBOX *kbd_mb;
-    MAILBOX *mouse_mb;
+    EFI_PHYSICAL_ADDRESS vp_addr = VIRTUAL_PS2_BASE;
     USB_TOPOLOGY *topo;
 
-    *out_kbd_mailbox   = NULL;
-    *out_mouse_mailbox = NULL;
-
-    /* 1. Allocate a page for each MAILBOX (keyboard + mouse, on separate
-     *    rings; EFI_RESERVED_MEMORY_TYPE), placed at the highest address so
-     *    an E820-collecting OS never allocates over them. */
-    status = allocate_reserved_pages_high(1, &kbd_mailbox_addr);
+    /* 1. Reserve the fixed virtual 8042 port region page. The virtual port
+     *    lives at the fixed address VIRTUAL_PS2_BASE (0x10000030) so the OS's
+     *    PS/2 driver can reference it directly. Mark the containing page
+     *    EFI_RESERVED_MEMORY_TYPE so the OS never allocates over it. */
+    status = uefi_call_wrapper(
+        BS->AllocatePages, 4, AllocateAddress, EfiReservedMemoryType, 1, &vp_addr);
     if (EFI_ERROR(status))
         return status;
-    kbd_mb = (MAILBOX *)(UINTN)kbd_mailbox_addr;
 
-    status = allocate_reserved_pages_high(1, &mouse_mailbox_addr);
-    if (EFI_ERROR(status))
-        return status;
-    mouse_mb = (MAILBOX *)(UINTN)mouse_mailbox_addr;
-
-    /* Initialize and publish both mailboxes. (main.c also calls these after
-     * this function; both are idempotent.) */
-    mailbox_init(kbd_mb);
-    mailbox_init(mouse_mb);
-    mailbox_publish_kbd(kbd_mb);
-    mailbox_publish_mouse(mouse_mb);
-
-    /* 2. Allocate + reserve the bridge code region (also high-placed). */
+    /* 2. Allocate + reserve the bridge code region (high-placed). */
     status = allocate_reserved_pages_high(BRIDGE_REGION_PAGES, &bridge_addr);
     if (EFI_ERROR(status))
         return status;
@@ -156,10 +139,6 @@ uefi_reserve_memory(MAILBOX **out_kbd_mailbox, MAILBOX **out_mouse_mailbox)
     topo = (USB_TOPOLOGY *)(UINTN)topo_addr;
     *topo = g_usb_topology;
     usb_topology_publish(topo);
-
-    /* 4. Return the mailbox pointers. */
-    *out_kbd_mailbox   = kbd_mb;
-    *out_mouse_mailbox = mouse_mb;
 
     return EFI_SUCCESS;
 }

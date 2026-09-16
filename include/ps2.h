@@ -2,8 +2,9 @@
  * ps2.h - PS/2 Set 1 scancode and mouse-packet definitions.
  *
  * The bridge translates HID reports into a virtual PS/2 byte stream that the
- * mailbox delivers (see docs/architecture.md section 6). The OS reuses its
- * existing Set 1 decoder and 3-byte mouse-packet parser unchanged.
+ * virtual 8042 port region delivers (see docs/architecture.md section 6). The
+ * OS reuses its existing Set 1 decoder and 3-byte mouse-packet parser
+ * unchanged.
  */
 
 #ifndef PS2_H

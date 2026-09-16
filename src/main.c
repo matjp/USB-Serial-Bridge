@@ -4,7 +4,7 @@
  * Boot-time setup, before ExitBootServices:
  *   1. Verify the host controller is XHCI >= 1.0 (C6).
  *   2. Enumerate the single USB keyboard and mouse (U1).
- *   3. Allocate + reserve the bridge and mailbox regions (U3).
+ *   3. Allocate + reserve the bridge and virtual port regions (U3).
  *   4. Bring up the highest core via SIPI, loading the bridge code (U2).
  *   5. Hand off to the bootloader / OS on the BSP (core 0).
  *
@@ -14,7 +14,6 @@
 #include <efi.h>
 #include <efilib.h>
 
-#include <mailbox.h>
 #include "uefi/uefi.h"
 
 EFI_STATUS
@@ -22,12 +21,10 @@ EFIAPI
 efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 {
     EFI_STATUS status;
-    MAILBOX *kbd_mailbox;
-    MAILBOX *mouse_mailbox;
 
     InitializeLib(image, systab);
 
-    Print(L"USB HID -> Polled Mailbox Bridge\n");
+    Print(L"USB HID -> Virtual 8042 Port Bridge\n");
 
     /* 1. Verify XHCI >= 1.0 (C6). */
     status = uefi_verify_xhci();
@@ -43,16 +40,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         return status;
     }
 
-    /* 3. Allocate + reserve the bridge and mailbox regions (U3). */
-    status = uefi_reserve_memory(&kbd_mailbox, &mouse_mailbox);
+    /* 3. Allocate + reserve the bridge and virtual port regions (U3). */
+    status = uefi_reserve_memory();
     if (EFI_ERROR(status)) {
         Print(L"ERROR: memory reservation failed (status %r)\n", status);
         return status;
     }
-    mailbox_init(kbd_mailbox);
-    mailbox_init(mouse_mailbox);
-    mailbox_publish_kbd(kbd_mailbox);
-    mailbox_publish_mouse(mouse_mailbox);
 
     /* 4. Bring up the highest core via SIPI, loading the bridge code (U2). */
     status = uefi_bringup_highest_core();

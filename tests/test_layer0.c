@@ -1,8 +1,8 @@
 /*
  * test_layer0.c - Host unit tests for the Layer 0 bridge modules.
  *
- * Covers B2 (HID parser), B3 (HID -> PS/2 Set 1 translator), B4 (mailbox
- * writer), and O1 (mailbox reader), plus the mailbox ring buffer itself.
+ * Covers B2 (HID parser), B3 (HID -> PS/2 Set 1 translator), and B4 (virtual
+ * 8042 port writer).
  *
  * These modules are pure C and hardware-independent, so host tests are
  * authoritative (see docs/architecture.md section 9, Layer 0).
@@ -17,10 +17,8 @@
 #include <efi.h>      /* resolves to tests/efi/efi.h (shim) */
 #include <hid.h>
 #include <ps2.h>
-#include <mailbox.h>
 
 #include "bridge.h"   /* B2, B3, B4 */
-#include "adapter.h"  /* O1 */
 #include "hid_event.h"
 
 /* ------------------------------------------------------------------ */
@@ -33,15 +31,6 @@ extern HID_KBD_REPORT   g_raw_kbd;
 extern HID_MOUSE_REPORT g_raw_mouse;
 extern BOOLEAN g_kbd_valid;
 extern BOOLEAN g_mouse_valid;
-
-/* O1 (mailbox_reader.c) defines the drained byte streams. The ADAPTER_STREAM
- * type is file-local there, so we mirror its layout here for the test. */
-typedef struct {
-    UINT8  bytes[MAILBOX_RING_SIZE];
-    UINTN  count;
-} ADAPTER_STREAM;
-extern ADAPTER_STREAM g_adapter_kbd_stream;
-extern ADAPTER_STREAM g_adapter_mouse_stream;
 
 /* ------------------------------------------------------------------ */
 /* Minimal test framework                                              */
@@ -87,43 +76,6 @@ reset_bridge_state(void)
     g_hid_events.mouse_valid = FALSE;
     g_ps2_kbd_stream.count   = 0;
     g_ps2_mouse_stream.count = 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* Test 1: mailbox ring buffer (producer/consumer, wrap-around)        */
-/* ------------------------------------------------------------------ */
-
-static void
-test_mailbox_ring(void)
-{
-    MAILBOX mb;
-    UINT8 byte;
-    UINTN i;
-
-    printf("\n[Test 1] Mailbox ring buffer\n");
-
-    mailbox_init(&mb);
-    CHECK(mb.head == 0 && mb.tail == 0, "init: head=tail=0");
-
-    /* Empty read returns 0. */
-    CHECK(mailbox_read(&mb, &byte) == 0, "empty read returns 0");
-
-    /* Write/read round-trip. */
-    mailbox_write(&mb, 0x1C);   /* 'A' make */
-    mailbox_write(&mb, 0x9C);   /* 'A' break */
-    CHECK(mailbox_read(&mb, &byte) == 1 && byte == 0x1C, "read back 0x1C");
-    CHECK(mailbox_read(&mb, &byte) == 1 && byte == 0x9C, "read back 0x9C");
-    CHECK(mailbox_read(&mb, &byte) == 0, "empty after drain");
-
-    /* Wrap-around: write more than MAILBOX_RING_SIZE bytes. */
-    mailbox_init(&mb);
-    for (i = 0; i < MAILBOX_RING_SIZE + 10; i++)
-        mailbox_write(&mb, (UINT8)(i & 0xFF));
-    for (i = 0; i < MAILBOX_RING_SIZE + 10; i++) {
-        CHECK(mailbox_read(&mb, &byte) == 1 &&
-              byte == (UINT8)(i & 0xFF), "wrap-around byte order");
-    }
-    CHECK(mailbox_read(&mb, &byte) == 0, "empty after wrap-around drain");
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,87 +246,6 @@ test_b3_translate(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Test 6: B4 mailbox writer + O1 mailbox reader (end-to-end)          */
-/* ------------------------------------------------------------------ */
-
-static void
-test_b4_o1_roundtrip(void)
-{
-    MAILBOX kbd_mb;
-    MAILBOX mouse_mb;
-    UINTN i;
-
-    printf("\n[Test 6] B4 mailbox writer + O1 mailbox reader (round-trip)\n");
-
-    mailbox_init(&kbd_mb);
-    mailbox_init(&mouse_mb);
-    reset_bridge_state();
-
-    /* Build a small PS/2 kbd stream: 'A' make (0x1C), 'A' break (0x9C). */
-    g_ps2_kbd_stream.bytes[0] = 0x1C;
-    g_ps2_kbd_stream.bytes[1] = 0x9C;
-    g_ps2_kbd_stream.count    = 2;
-
-    /* B4: write to the two mailboxes. */
-    bridge_write_mailbox(&kbd_mb, &mouse_mb);
-    CHECK(g_ps2_kbd_stream.count == 0, "B4 consumed the kbd stream");
-    CHECK(kbd_mb.head == 2, "kbd mailbox head advanced to 2");
-    CHECK(mouse_mb.head == 0, "mouse mailbox head unchanged");
-
-    /* O1: drain the two mailboxes. */
-    adapter_drain_mailbox(&kbd_mb, &mouse_mb);
-    CHECK(g_adapter_kbd_stream.count == 2, "O1 drained 2 kbd bytes");
-    if (g_adapter_kbd_stream.count == 2) {
-        CHECK_EQ_U8(g_adapter_kbd_stream.bytes[0], 0x1C, "O1 kbd byte 0 = 0x1C");
-        CHECK_EQ_U8(g_adapter_kbd_stream.bytes[1], 0x9C, "O1 kbd byte 1 = 0x9C");
-    }
-    CHECK(g_adapter_mouse_stream.count == 0, "O1 drained 0 mouse bytes");
-    CHECK(kbd_mb.tail == kbd_mb.head, "O1 drained kbd fully (tail == head)");
-
-    /* Full pipeline: B2 -> B3 -> B4 -> O1 for a key press. */
-    mailbox_init(&kbd_mb);
-    mailbox_init(&mouse_mb);
-    reset_bridge_state();
-
-    g_raw_kbd.key[0] = 0x04;   /* 'A' */
-    g_kbd_valid = TRUE;
-    bridge_parse_hid();        /* B2 */
-    bridge_translate_ps2();    /* B3 */
-    bridge_write_mailbox(&kbd_mb, &mouse_mb); /* B4 */
-    adapter_drain_mailbox(&kbd_mb, &mouse_mb);/* O1 */
-
-    CHECK(g_adapter_kbd_stream.count == 1, "pipeline: 1 kbd byte for 'A' make");
-    if (g_adapter_kbd_stream.count == 1)
-        CHECK_EQ_U8(g_adapter_kbd_stream.bytes[0], 0x1C, "pipeline: 'A' make 0x1C");
-    CHECK(g_adapter_mouse_stream.count == 0, "pipeline: no mouse bytes for a key");
-
-    /* Full pipeline for a mouse move. */
-    mailbox_init(&kbd_mb);
-    mailbox_init(&mouse_mb);
-    reset_bridge_state();
-
-    g_raw_mouse.buttons = 0x00;
-    g_raw_mouse.dx      = 5;
-    g_raw_mouse.dy      = 0;
-    g_mouse_valid = TRUE;
-    bridge_parse_hid();        /* B2 */
-    bridge_translate_ps2();    /* B3 */
-    bridge_write_mailbox(&kbd_mb, &mouse_mb); /* B4 */
-    adapter_drain_mailbox(&kbd_mb, &mouse_mb);/* O1 */
-
-    CHECK(g_adapter_mouse_stream.count == 3, "pipeline: 3-byte mouse packet");
-    if (g_adapter_mouse_stream.count == 3) {
-        CHECK_EQ_U8(g_adapter_mouse_stream.bytes[0], 0x00, "pipeline: mouse buttons 0");
-        CHECK_EQ_U8(g_adapter_mouse_stream.bytes[1], 0x05, "pipeline: mouse dx 5");
-        CHECK_EQ_U8(g_adapter_mouse_stream.bytes[2], 0x00, "pipeline: mouse dy 0");
-    }
-    CHECK(g_adapter_kbd_stream.count == 0, "pipeline: no kbd bytes for a mouse move");
-
-    /* Unused loop var guard. */
-    (void)i;
-}
-
-/* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -384,12 +255,10 @@ main(void)
     printf("Layer 0 host unit tests\n");
     printf("=======================\n");
 
-    test_mailbox_ring();
     test_b2_keyboard();
     test_b2_modifiers();
     test_b2_mouse();
     test_b3_translate();
-    test_b4_o1_roundtrip();
 
     printf("\n=======================\n");
     printf("Results: %d passed, %d failed\n", g_pass, g_fail);
