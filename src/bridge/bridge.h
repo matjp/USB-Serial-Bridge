@@ -2,9 +2,9 @@
  * bridge.h - Internal interface for the bridge core (Phase 2).
  *
  * The bridge runs on the highest core, TDM-shared with the OS's background
- * task (Seth for TempleOS). It drives the two pre-discovered low/full-speed
- * interrupt endpoints, translates HID -> virtual PS/2, and writes the byte
- * stream to the mailbox. See docs/architecture.md section 7.1.
+ * task. It drives the two pre-discovered low/full-speed interrupt endpoints,
+ * translates HID -> virtual PS/2, and writes the byte stream to the mailbox.
+ * See docs/architecture.md section 7.1.
  */
 
 #ifndef BRIDGE_H

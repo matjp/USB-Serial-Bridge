@@ -17,11 +17,11 @@
 #include "../bridge/usb_topology.h"
 
 /* ------------------------------------------------------------------ */
-/* Constants (TempleOS MultiProc.HC conventions).                      */
+/* Constants (standard x86 APIC multiprocessor conventions).           */
 /* ------------------------------------------------------------------ */
 
 /* INIT IPI vector (0xC4500) and STARTUP IPI base (0xC4600 + MPN_VECT),
- * per the reference OS's MultiProc.HC. */
+ * per the standard x86 multiprocessor startup convention. */
 #define INIT_IPI_VECTOR      0xC4500
 #define STARTUP_IPI_BASE     0xC4600
 #define MPN_VECT             0x1000   /* startup code page number */
@@ -120,7 +120,7 @@ uefi_bringup_highest_core(void)
 
     /* 5. Start the highest core via SIPI.
      *
-     * Per TempleOS MultiProc.HC conventions: send an INIT IPI
+     * Per the standard x86 multiprocessor convention: send an INIT IPI
      * (0xC4500) then a STARTUP IPI (0xC4600 + MPN_VECT). The AP begins
      * executing the startup code, which sets up its environment and jumps to
      * bridge_entry() (B5). */

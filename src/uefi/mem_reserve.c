@@ -2,10 +2,10 @@
  * mem_reserve.c - U3: Bridge + mailbox memory reservation.
  *
  * Allocates and reserves the bridge code region and the mailbox region so
- * the OS does not reuse them. Because TempleOS boots via its own BIOS
- * bootloader collecting E820 (not the UEFI memory map), an
+ * the OS does not reuse them. Because an OS that boots via its own BIOS
+ * bootloader collects E820 (not the UEFI memory map), an
  * EFI_RESERVED_MEMORY_TYPE entry alone is NOT sufficient - the region must
- * also be carved out of E820 or placed above mem_physical_space.
+ * also be carved out of E820 or placed above the OS's physical memory space.
  *
  * NOTE: This is a scaffold. The allocation + reservation logic is filled in
  * by the Firmware Coder (see docs/architecture.md section 7.3, module U3).
@@ -37,15 +37,14 @@ extern USB_TOPOLOGY g_usb_topology;
 /* ------------------------------------------------------------------ */
 /* Highest-address allocation helper.                                  */
 /*                                                                     */
-/* EfiReservedMemoryType alone is NOT sufficient for an E820-collecting  */
-/* OS (e.g. TempleOS boots via its own BIOS bootloader and collects the */
-/* E820 map, not the UEFI map). The reserved region must ALSO be placed  */
-/* ABOVE the OS's physical memory space so the OS never allocates over   */
-/* it. We implement the high-placement strategy: walk the EFI memory     */
-/* map, find the highest conventional-memory region, and allocate the    */
-/* reserved pages at the very top of it (via AllocateMaxAddress). This    */
-/* places the bridge/mailbox/topology above the bulk of the OS's         */
-/* physical memory.                                                      */
+/* EfiReservedMemoryType alone is NOT sufficient for an E820-collecting
+ * OS (one that boots via its own BIOS bootloader and collects the E820
+ * map, not the UEFI map). The reserved region must ALSO be placed ABOVE
+ * the OS's physical memory space so the OS never allocates over it. We
+ * implement the high-placement strategy: walk the EFI memory map, find
+ * the highest conventional-memory region, and allocate the reserved pages
+ * at the very top of it (via AllocateMaxAddress). This places the
+ * bridge/mailbox/topology above the bulk of the OS's physical memory. */
 /* ------------------------------------------------------------------ */
 static EFI_STATUS
 allocate_reserved_pages_high(UINTN pages, EFI_PHYSICAL_ADDRESS *out)

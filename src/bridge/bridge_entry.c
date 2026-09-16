@@ -2,8 +2,8 @@
  * bridge_entry.c - B5: Bridge core entry point.
  *
  * Runs on the highest core after SIPI bring-up. TDM-shares the core with the
- * OS's background task (Seth for TempleOS): the bridge polls the USB
- * endpoints in its time slice, then yields the core back to the OS task.
+ * OS's background task: the bridge polls the USB endpoints in its time
+ * slice, then yields the core back to the OS task.
  *
  * The bridge polls the two interrupt IN endpoints (B1), parses HID (B2),
  * translates to PS/2 (B3), and drains the byte stream into the mailbox (B4)
@@ -45,8 +45,8 @@ bridge_entry(void)
         bridge_write_mailbox(kbd_mb, mouse_mb);
 
         /* TDM handshake: yield the core back to the OS background task
-         * (Seth) until the next bridge time slice. The timer ISR on this
-         * core fires at each slot boundary and switches back to the bridge
+         * until the next bridge time slice. The timer ISR on this core
+         * fires at each slot boundary and switches back to the bridge
          * context (tdm_switch_to_bridge). */
         tdm_switch_to_os();
     }

@@ -15,10 +15,10 @@
  *     The keyboard and mouse arrive on SEPARATE streams (separate mailbox
  *     rings), so there is no ambiguity between them.
  *   - OS-specific injection hook: the core calls a swappable injector for
- *     each semantic event. In the firmware build this defaults to the
- *     TempleOS injectors; the host test overrides it with a stub queue.
- *     This keeps O2 testable on host and portable to a second OS (only the
- *     hook changes).
+ *     each semantic event. The default injectors are safe no-ops; the OS
+ *     integration (O2) wires them to the target OS's input path, and the
+ *     host test overrides them with a stub queue. This keeps O2 testable on
+ *     host and portable to any OS (only the hook changes).
  */
 
 #include <efi.h>
@@ -50,37 +50,35 @@ typedef void (*O2_KEY_INJECTOR)(BOOLEAN make, UINT8 scancode, BOOLEAN extended);
 /* A single mouse packet: buttons + signed deltas. */
 typedef void (*O2_MOUSE_INJECTOR)(UINT8 buttons, INT8 dx, INT8 dy);
 
-/* TempleOS reference injection point (wired at Layer 3 / real-OS
- * integration - the addresses are NOT available at build time):
- *   - Keyboard: KeyDev.HC PutKey(ch, sc) - the same queue the OS's KBD
- *     driver consumes. The adapter writes scancodes into that in-memory
- *     queue.
- *   - Mouse: feed the 3-byte packets into the same buffer Mouse.HC
- *     MsHardHndlr() reads.
+/* Default injection hooks (wired to the target OS at OS-integration time;
+ * the OS input-path addresses are NOT available at build time):
+ *   - Keyboard: write the scancode into the OS's keyboard input queue.
+ *   - Mouse: feed the 3-byte packet into the OS's mouse input buffer.
  * These default bodies are safe no-ops: they do NOT dereference any
  * address, so they cannot crash. Do NOT hardcode fake addresses here. */
 static void
-o2_inject_key_templeos(BOOLEAN make, UINT8 scancode, BOOLEAN extended)
+o2_inject_key_default(BOOLEAN make, UINT8 scancode, BOOLEAN extended)
 {
-    /* TODO(Layer 3): write into the TempleOS KeyDev.HC PutKey queue. */
+    /* TODO(OS integration): write into the target OS's keyboard queue. */
     (void)make;
     (void)scancode;
     (void)extended;
 }
 
 static void
-o2_inject_mouse_templeos(UINT8 buttons, INT8 dx, INT8 dy)
+o2_inject_mouse_default(UINT8 buttons, INT8 dx, INT8 dy)
 {
-    /* TODO(Layer 3): write into the TempleOS Mouse.HC MsHardHndlr buffer. */
+    /* TODO(OS integration): write into the target OS's mouse buffer. */
     (void)buttons;
     (void)dx;
     (void)dy;
 }
 
-/* Swappable hooks. Default to the TempleOS injectors. The host test
- * overrides these to capture what O2 would inject into a stub queue. */
-O2_KEY_INJECTOR   g_o2_key_injector   = o2_inject_key_templeos;
-O2_MOUSE_INJECTOR g_o2_mouse_injector = o2_inject_mouse_templeos;
+/* Swappable hooks. Default to the safe no-op injectors. The OS integration
+ * (O2) wires these to the target OS's input path; the host test overrides
+ * them to capture what O2 would inject into a stub queue. */
+O2_KEY_INJECTOR   g_o2_key_injector   = o2_inject_key_default;
+O2_MOUSE_INJECTOR g_o2_mouse_injector = o2_inject_mouse_default;
 
 /* ------------------------------------------------------------------ */
 /* OS-independent parsing core.                                       */

@@ -1,11 +1,11 @@
 /*
  * tdm.h - Time-Division Multiplexing context switch (bridge <-> OS task).
  *
- * The bridge and the OS background task (Seth for TempleOS) share the
- * highest core via time-division multiplexing. A timer ISR on that core
- * fires at each slot boundary and alternates between the bridge context and
- * the OS task context. Each switch saves/restores the callee-saved registers
- * and the stack pointer - a minimal cooperative context switch, ring 0, same
+ * The bridge and the OS background task share the highest core via
+ * time-division multiplexing. A timer ISR on that core fires at each slot
+ * boundary and alternates between the bridge context and the OS task
+ * context. Each switch saves/restores the callee-saved registers and the
+ * stack pointer - a minimal cooperative context switch, ring 0, same
  * address space (no memory protection).
  *
  * Slot length: 2 ms (see TDM_SLOT_US). This gives the bridge enough time to

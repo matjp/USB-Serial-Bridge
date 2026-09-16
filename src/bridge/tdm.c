@@ -2,10 +2,10 @@
  * tdm.c - Time-Division Multiplexing context switch (bridge <-> OS task).
  *
  * Implements the TDM interface declared in tdm.h. The bridge and the OS
- * background task (Seth for TempleOS) share the highest core via
- * time-division multiplexing. A local-APIC timer ISR on that core fires at
- * each slot boundary (TDM_SLOT_US = 2 ms) and alternates between the bridge
- * context and the OS task context.
+ * background task share the highest core via time-division multiplexing. A
+ * local-APIC timer ISR on that core fires at each slot boundary
+ * (TDM_SLOT_US = 2 ms) and alternates between the bridge context and the OS
+ * task context.
  *
  * Each switch saves/restores the callee-saved registers (RBX, RBP, R12-R15)
  * and the stack pointer (RSP) - a minimal cooperative context switch, ring 0,
