@@ -204,6 +204,17 @@ typedef struct {
   fault record. It exercises the verify failure (spec < 1.0) and the reset failure
   (USBSTS.HCH never set), and confirms a healthy controller produces no fault. This
   verifies the new failure code end-to-end without hardware.
+- **Debug-build success dump (`BRIDGE_DEBUG`):** the fault record covers failure, but
+  for downstream debugging and verification it is also useful to capture the ACTUAL XHCI
+  hardware state when bring-up SUCCEEDS. A `make debug` target builds
+  `build-debug/bridge-debug.efi` with `-DBRIDGE_DEBUG`. In that build B1 fills and
+  publishes a **success record** (`src/bridge/xhci_status.h`, `XHCI_STATUS`) at the next
+  free reserved-region pointer slot (`0x10000020`) after bring-up completes — the
+  register snapshot (`USBSTS`/`USBCMD`/`CRCR`), the controller capabilities
+  (slots/eps/scratchpad/page size), the MMIO base + CAPLENGTH, and the discovered
+  kbd/mouse endpoint configuration. The Layer 1 harness then prints this state to the
+  console on success (bounded wait for the record, ~6 lines, fits 80×25). The normal
+  `bridge.efi` build is unchanged (silent on success).
 
 ### 2.2 B2 — HID report parser (`src/bridge/hid_parser.c`)
 

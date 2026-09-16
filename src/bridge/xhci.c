@@ -26,6 +26,7 @@
 #include "bridge.h"
 #include "usb_topology.h"
 #include "xhci_fault.h"
+#include "xhci_status.h"
 
 /* Freestanding firmware: <efi.h> does not pull in <string.h>. Declare the
  * libc memset we use to clear the fault record (host build provides it). */
@@ -210,6 +211,13 @@ static XHCI_FAULT g_xhci_fault_rec;
 /* One-time bring-up latch (file scope so the host test can reset it). */
 static BOOLEAN g_xhci_initialized = FALSE;
 
+#ifdef BRIDGE_DEBUG
+/* Debug builds only: a success record capturing the ACTUAL XHCI hardware
+ * state after bring-up, so the harness can print it for downstream
+ * verification (see xhci_status.h). */
+static XHCI_STATUS g_xhci_status;
+#endif /* BRIDGE_DEBUG */
+
 /* ------------------------------------------------------------------ */
 /* Weak indirection points for the host fault-injection test.          */
 /*                                                                     */
@@ -291,6 +299,39 @@ xhci_fault(XHCI *xhci, UINT32 stage, UINT32 hint)
     g_xhci_fault_rec.last_trb_type = 0;
     g_xhci_fault_rec.doorbell      = 0;
 }
+
+#ifdef BRIDGE_DEBUG
+/* Debug builds only: fill and publish the success record capturing the ACTUAL
+ * XHCI hardware state after bring-up, so the harness can print it for
+ * downstream verification (see xhci_status.h). Packs the two endpoints into
+ * 32-bit words (addr|ep<<8|int<<16|spd<<24). */
+static void
+xhci_status_record(const XHCI *xhci, const USB_TOPOLOGY *topo)
+{
+    g_xhci_status.magic           = XHCI_STATUS_MAGIC;
+    g_xhci_status.usbsts          = xhci_read32(&xhci->op[XHCI_OP_USBSTS / 4]);
+    g_xhci_status.usbcmd          = xhci_read32(&xhci->op[XHCI_OP_USBCMD / 4]);
+    g_xhci_status.crcr            = xhci_read32(&xhci->op[XHCI_OP_CRCR / 4]);
+    g_xhci_status.max_slots       = xhci->max_slots;
+    g_xhci_status.max_eps         = xhci->max_eps;
+    g_xhci_status.max_scratchpad  = xhci->max_scratchpad;
+    g_xhci_status.page_size       = xhci->page_size;
+    g_xhci_status.xhci_mmio_base  = topo->xhci_mmio_base;
+    g_xhci_status.xhci_cap_len    = topo->xhci_cap_len;
+    g_xhci_status.kbd             = (UINT32)topo->kbd.device_addr
+                                  | ((UINT32)topo->kbd.endpoint << 8)
+                                  | ((UINT32)topo->kbd.interval << 16)
+                                  | ((UINT32)topo->kbd.speed << 24);
+    g_xhci_status.mouse           = (UINT32)topo->mouse.device_addr
+                                  | ((UINT32)topo->mouse.endpoint << 8)
+                                  | ((UINT32)topo->mouse.interval << 16)
+                                  | ((UINT32)topo->mouse.speed << 24);
+    g_xhci_status.kbd_max_packet  = topo->kbd.max_packet;
+    g_xhci_status.mouse_max_packet= topo->mouse.max_packet;
+
+    xhci_status_publish(&g_xhci_status);
+}
+#endif /* BRIDGE_DEBUG */
 
 /* Poll a register until a bit is set (returns TRUE) or a timeout elapses. */
 static BOOLEAN
@@ -663,6 +704,11 @@ bridge_poll_usb(void)
         g_xhci_fault_rec.doorbell = 2 * (topo->mouse.endpoint & 0x0F) + 1;
 
         g_xhci_initialized = TRUE;
+
+#ifdef BRIDGE_DEBUG
+        /* Debug builds: record the actual hardware state for the harness. */
+        xhci_status_record(&xhci, topo);
+#endif
     }
 
     /* Poll the event ring for completed transfers. */

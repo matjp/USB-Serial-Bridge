@@ -10,6 +10,7 @@
 
 ARCH            := x86_64
 TARGET          := bridge
+DEBUG_TARGET    := bridge-debug
 
 # GNU-EFI install locations (Alpine: gnu-efi-dev)
 EFI_INC         ?= /usr/include/efi
@@ -76,7 +77,7 @@ SRCS            := $(APP_SRCS) $(BRIDGE_SRCS) $(ADAPTER_SRCS) $(COMMON_SRCS)
 OBJS            := $(SRCS:src/%.c=build/%.o)
 
 # --- Rules ------------------------------------------------------------------
-.PHONY: all clean test
+.PHONY: all clean test debug
 
 all: build/$(TARGET).efi
 
@@ -93,8 +94,30 @@ build/$(TARGET).efi: build/$(TARGET).so
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .dynamic -j .dynsym -j .rel* \
 		-j .rela* -j .reloc --target=efi-app-$(ARCH) $< $@
 
+# --- Debug build ------------------------------------------------------------
+# Produces build/bridge-debug.efi with -DBRIDGE_DEBUG. The bridge records the
+# actual XHCI hardware state on a successful bring-up and the Layer 1 harness
+# prints it to the console (see src/bridge/xhci_status.h). The normal build is
+# unchanged (silent on success).
+DEBUG_CFLAGS := $(CFLAGS) -DBRIDGE_DEBUG
+DEBUG_OBJS   := $(SRCS:src/%.c=build-debug/%.o)
+
+build-debug/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(DEBUG_CFLAGS) -c $< -o $@
+
+build-debug/$(DEBUG_TARGET).so: $(DEBUG_OBJS) $(CRT0)
+	$(LD) $(LDFLAGS) $(DEBUG_OBJS) $(CRT0) \
+		-o $@ $(EFI_LIB)/libgnuefi.a
+
+build-debug/$(DEBUG_TARGET).efi: build-debug/$(DEBUG_TARGET).so
+	$(OBJCOPY) -j .text -j .sdata -j .data -j .dynamic -j .dynsym -j .rel* \
+		-j .rela* -j .reloc --target=efi-app-$(ARCH) $< $@
+
+debug: build-debug/$(DEBUG_TARGET).efi
+
 clean:
-	rm -rf build
+	rm -rf build build-debug
 
 # Layer 0 host unit tests (B2, B3, B4, O1) - no UEFI, no hardware, no OS.
 # See docs/architecture.md section 9, Layer 0.

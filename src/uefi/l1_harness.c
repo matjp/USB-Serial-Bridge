@@ -17,6 +17,7 @@
 
 #include "uefi.h"
 #include "../bridge/xhci_fault.h"
+#include "../bridge/xhci_status.h"
 
 /* Bounded spin so the bridge has time to run its first bring-up poll after
  * SIPI. Bring-up is microseconds-to-low-milliseconds; a few million empty
@@ -103,6 +104,43 @@ print_fault(const XHCI_FAULT *f)
     Print(L"*** Halting; not handing off to the OS. ***\n");
 }
 
+#ifdef BRIDGE_DEBUG
+/* Debug builds only: wait for the bridge to publish its success record and
+ * print the actual XHCI hardware state. Called when the bridge is healthy
+ * (no fault), so the state is available for downstream verification. */
+static void
+print_bridge_status(void)
+{
+    XHCI_STATUS *st;
+    UINT32 i;
+
+    /* Wait (bounded) for the bridge to publish the success record. */
+    for (i = 0; i < BRIDGE_WAIT_ITERS; i++) {
+        st = xhci_status_lookup();
+        if (st != NULL && st->magic == XHCI_STATUS_MAGIC)
+            break;
+        spin(1);
+    }
+    if (st == NULL || st->magic != XHCI_STATUS_MAGIC)
+        return;   /* no success record (non-debug bridge or not reached) */
+
+    Print(L"\n");
+    Print(L"*** BRIDGE OK: XHCI bring-up succeeded ***\n");
+    Print(L"  MMIO  : 0x%08X  CAPLEN: 0x%02X\n",
+          st->xhci_mmio_base, st->xhci_cap_len);
+    Print(L"  Slots : %d  Eps: %d  Scratch: %d  Page: 0x%04X\n",
+          st->max_slots, st->max_eps, st->max_scratchpad, st->page_size);
+    Print(L"  USBSTS: 0x%08X  USBCMD: 0x%08X  CRCR: 0x%08X\n",
+          st->usbsts, st->usbcmd, st->crcr);
+    Print(L"  Kbd   : addr %d  ep 0x%02X  int %d  spd %d  pkt %d\n",
+          st->kbd & 0xFF, (st->kbd >> 8) & 0xFF, (st->kbd >> 16) & 0xFF,
+          (st->kbd >> 24) & 0xFF, st->kbd_max_packet);
+    Print(L"  Mouse : addr %d  ep 0x%02X  int %d  spd %d  pkt %d\n",
+          st->mouse & 0xFF, (st->mouse >> 8) & 0xFF, (st->mouse >> 16) & 0xFF,
+          (st->mouse >> 24) & 0xFF, st->mouse_max_packet);
+}
+#endif /* BRIDGE_DEBUG */
+
 /* Check the bridge fault record after bring-up. If the bridge faulted, print
  * the diagnosis and halt (never boot the OS). Otherwise return normally. */
 void
@@ -110,8 +148,13 @@ uefi_check_bridge_fault(void)
 {
     XHCI_FAULT *fault = wait_for_bridge_fault();
 
-    if (fault == NULL)
+    if (fault == NULL) {
+#ifdef BRIDGE_DEBUG
+        /* Bridge is healthy; in debug builds print the hardware state. */
+        print_bridge_status();
+#endif
         return;   /* bridge is healthy; proceed to hand off */
+    }
 
     print_fault(fault);
 

@@ -434,6 +434,13 @@ design is proven before it.
   `bridge_poll_usb()` into real failure paths (verify spec < 1.0; reset USBSTS.HCH never
   set) and asserts the fault record — a one-shot verification of the new failure code
   without hardware. A healthy-controller case confirms no fault is raised.
+- **Debug-build success dump (`BRIDGE_DEBUG`):** the fault record covers failure; for
+  downstream debugging and verification a `make debug` target builds
+  `build-debug/bridge-debug.efi` with `-DBRIDGE_DEBUG`. In that build B1 publishes a
+  **success record** (`src/bridge/xhci_status.h`) after a successful bring-up — the
+  register snapshot (`USBSTS`/`USBCMD`/`CRCR`), controller capabilities, MMIO base +
+  CAPLENGTH, and the discovered kbd/mouse endpoints — and the harness prints it to the
+  console on success. The normal `bridge.efi` build is unchanged (silent on success).
 - This covers B1, B2, B3, B4, B5, U1, U2, U3, and O1 — the entire bridge and boot-time
   path — without an OS, on both QEMU and real hardware.
 
