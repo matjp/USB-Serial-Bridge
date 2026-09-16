@@ -1,5 +1,5 @@
 # Firmware Coder Implementation Spec
-## Exact interfaces, structs, and function signatures for B1–B5, U1–U3, O1–O2
+## Exact interfaces, structs, and function signatures for B1–B5, U1–U3, O1
 
 **Document version:** 1.0
 **Status:** Approved — ready for implementation
@@ -20,8 +20,9 @@
   All sources are already wired into the Makefile. **Do not add new source files to the
   build** unless you also update `Makefile` `*_SRCS` and re-verify.
 - **Existing headers are authoritative.** `include/mailbox.h`, `include/hid.h`,
-  `include/ps2.h` are the ABI. Do not change their public layout or the mailbox
-  byte-stream semantics (§6 of architecture.md). You may add internal-only helpers.
+  `include/ps2.h`, `include/virtual_ps2.h` are the ABI. Do not change their public
+  layout or the virtual-port byte-stream semantics (§6 of architecture.md). You may add
+  internal-only helpers.
 - **GNU-EFI does NOT ship USB protocol headers.** There is no `efiusb.h`. The
   `EFI_USB2_HC_PROTOCOL` and `EFI_USB_IO_PROTOCOL` structs must be **defined by the
   Firmware Coder** (from the UEFI 2.x spec) in a new internal header, OR the XHCI
@@ -267,8 +268,8 @@ void bridge_translate_ps2(void);
 2. **Mouse:** assemble a 3-byte packet `[buttons, dx, dy]` (`PS2_MOUSE_PKT`) from the
    `HID_MOUSE_EVENT`.
 3. **Emit the byte streams** into file-local output buffers for B4. Keyboard and
-   mouse are kept on **separate streams** (mirroring real PS/2's separate ports
-   0x60/0x64), so O2 never has to disambiguate them:
+   mouse are kept on **separate streams** (the bridge prioritizes keyboard over mouse
+   when writing the single virtual data slot):
    ```c
    #define PS2_STREAM_MAX 32
    typedef struct {
@@ -299,25 +300,37 @@ void bridge_translate_ps2(void);
 > the OS decodes bytes identically to a real PS/2 keyboard. Verify against the
 > reference OS (TempleOS `Keyboard.HC`).
 
-### 2.4 B4 — Mailbox writer (`src/bridge/mailbox_writer.c`)
+### 2.4 B4 — Virtual 8042 port writer (`src/bridge/virtual_ps2_writer.c`)
 
-**Responsibility:** Write the translated PS/2 byte stream into the cross-core mailbox.
+**Responsibility:** Write the translated PS/2 byte stream into the virtual 8042 port
+region (see `include/virtual_ps2.h`), with faithful 8042 single-output-buffer
+semantics.
 
 **Public interface (already in `src/bridge/bridge.h`):**
 ```c
-void bridge_write_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
+void bridge_write_virtual_ps2(void);
+void bridge_virtual_ps2_reset(void);   /* reset write cursors (host tests) */
 ```
 
 **Required implementation steps:**
-1. For each byte in `g_ps2_kbd_stream`, call `mailbox_write(kbd_mb, byte)`; for each
-   byte in `g_ps2_mouse_stream`, call `mailbox_write(mouse_mb, byte)` (from
-   `include/mailbox.h`). This already does the `mfence` + `head++` ordering.
-2. Reset `g_ps2_kbd_stream.count = 0` and `g_ps2_mouse_stream.count = 0` after writing.
-3. **Overflow policy:** if a mailbox is full (producer would lap the consumer), the
-   bridge must not corrupt the ring. Because the consumer drains continuously, the
-   simplest safe policy is to **drop the oldest pending bytes** (advance `head` past
-   them) rather than block. Document the chosen policy in a comment. (The consumer on
-   core 0 drains fast, so overflow is unlikely in practice.)
+1. **One byte in flight:** read the virtual status register. If any status bit is set
+   (`VIRTUAL_PS2_STAT_ANY`), the OS has not yet consumed the previous byte — do **not**
+   write another. Return (the next byte is written on a later poll once consumed).
+2. **Write one byte:** keyboard first (priority), then mouse. Write the byte to the
+   virtual data register, `mfence()`, then set the status bit (`STAT_KBD` or
+   `STAT_MOUSE`).
+3. **Write cursor:** B3 regenerates the full packet each poll, but the 8042 allows only
+   one byte in flight. Maintain a per-device write cursor (`g_vp_kbd_idx`,
+   `g_vp_mouse_idx`) that advances through the regenerated packet one byte per poll, so
+   a multi-byte packet (e.g. the 3-byte mouse packet) is emitted byte-by-byte across
+   polls. Reset a cursor when it reaches the stream's count.
+4. **Consume the streams:** reset `g_ps2_kbd_stream.count = 0` and
+   `g_ps2_mouse_stream.count = 0` after writing. Bytes not yet written are dropped
+   (input is lossy — the latest HID state is what matters).
+5. **Weak accessors:** the writer reads/writes the fixed addresses via weak functions
+   (`virtual_ps2_read_status`, `virtual_ps2_write_data`, `virtual_ps2_set_status`) so
+   host tests can override them with a mock register file (the fixed addresses are
+   unmapped on the host).
 
 ### 2.5 B5 — Bridge core entry / poll loop (`src/bridge/bridge_entry.c`)
 
@@ -329,90 +342,63 @@ void bridge_entry(void);
 ```
 
 **Required implementation steps:**
-1. On entry (after SIPI bring-up), locate the two mailboxes via `mailbox_lookup_kbd()`
-   and `mailbox_lookup_mouse()`.
-2. Run the poll loop:
+1. Run the poll loop:
    ```c
    void bridge_entry(void) {
-       MAILBOX *kbd_mb   = mailbox_lookup_kbd();
-       MAILBOX *mouse_mb = mailbox_lookup_mouse();
        for (;;) {
            bridge_poll_usb();          /* B1 */
            bridge_parse_hid();         /* B2 */
            bridge_translate_ps2();     /* B3 */
-           if (kbd_mb && mouse_mb)
-               bridge_write_mailbox(kbd_mb, mouse_mb); /* B4 */
+           bridge_write_virtual_ps2(); /* B4 */
            /* TDM: yield the core back to the OS background task (Seth) until
               the next bridge time slot. Implemented by the timer ISR that
               switches between bridge context and OS task context. */
        }
    }
    ```
-3. **TDM handshake:** the bridge runs in its own time slot on the highest core. The
+2. **TDM handshake:** the bridge runs in its own time slot on the highest core. The
    mechanism is a timer ISR on that core that round-robin switches between the bridge
    context and the OS background task context (save/restore registers + stack). The
    Firmware Coder implements the context-switch primitive (see §5 U2 for the bring-up
    side). The bridge loop itself is a simple `for(;;)`; the timer ISR preempts it at
    slot boundaries.
-4. **Error handling:** if B1 detects a non-XHCI-≥1.0 controller or a fatal XHCI fault,
+3. **Error handling:** if B1 detects a non-XHCI-≥1.0 controller or a fatal XHCI fault,
    the bridge should halt cleanly (e.g., enter an infinite idle loop) rather than
-   corrupt the mailbox. Log via a reserved status word if available.
+   corrupt the virtual port region. Log via a reserved status word if available.
 
 ---
 
-## 3. Input Adapter Modules (O1–O2) — core 0, per-OS
+## 3. Input Adapter Modules (O1) — core 0, per-OS
 
-### 3.1 O1 — Mailbox reader (`src/adapter/mailbox_reader.c`)
+### 3.1 O1 — Virtual port reader (OS PS/2 driver read)
 
-**Responsibility:** Drain the cross-core mailbox (consumer side).
+**Responsibility:** Read the virtual 8042 port region (consumer side) and feed the
+OS's existing PS/2 input handlers.
 
 **Public interface (already in `src/adapter/adapter.h`):**
 ```c
-void adapter_drain_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
+void adapter_read_virtual_ps2(void);
 ```
 
 **Required implementation steps:**
-1. Loop `mailbox_read(kbd_mb, &byte)` until it returns 0 (ring empty); accumulate the
-   keyboard scancode bytes into the keyboard stream.
-2. Loop `mailbox_read(mouse_mb, &byte)` until it returns 0; accumulate the mouse
-   3-byte packets `[buttons, dx, dy]` (`PS2_MOUSE_PKT_SIZE`) into the mouse stream.
-3. **O1 is OS-independent** — it only produces the byte streams. It does not know the OS.
+1. Read the virtual status register. If no status bit is set (`VIRTUAL_PS2_STAT_ANY`),
+   there is no pending byte — return.
+2. Read the virtual data register, then **read-and-clear** the status bit (a pure load
+   does NOT clear it, unlike a real 8042). Feed the byte to the OS's existing KBD/mouse
+   handler, disambiguated by which status bit was set (`STAT_KBD` vs `STAT_MOUSE`).
+3. **O1 is OS-specific** only in the final feed step (which OS handler to call). The
+   read-and-clear of the virtual port is OS-independent.
 
-**Internal output (consumed by O2):**
-```c
-/* file-local, or via adapter.h if shared */
-typedef struct {
-    UINT8  bytes[MAILBOX_RING_SIZE];
-    UINTN  count;
-} ADAPTER_STREAM;
-extern ADAPTER_STREAM g_adapter_kbd_stream;    /* keyboard scancodes only */
-extern ADAPTER_STREAM g_adapter_mouse_stream;  /* mouse 3-byte packets only */
-```
+> **OS-side change (documented, not implemented in this repo):** the OS's PS/2 driver
+> must replace its `in 0x60`/`in 0x64` reads with loads from the virtual port region,
+> and its data reads must be read-and-clear. This is the minimal OS change — the OS
+> reuses 100% of its existing decoder/parser/PutKey logic.
 
-### 3.2 O2 — Input injection (`src/adapter/input_inject.c`)
-
-**Responsibility:** Feed the drained scancodes/packets into the OS's existing input path.
-
-**Public interface (already in `src/adapter/adapter.h`):**
-```c
-void adapter_inject_input(void);
-```
-
-**Required implementation steps (per-OS):**
-1. **TempleOS reference:** the injection point is `KeyDev.HC` `PutKey(ch, sc)` — the
-   same queue the OS's KBD driver consumes. The adapter writes scancodes into that
-   in-memory queue. For the mouse, feed the 3-byte packets into the same buffer
-   `Mouse.HC` `MsHardHndlr()` reads.
-2. Because the OS is identity-mapped and its input structures live at known addresses,
-   the adapter (loaded code) locates and feeds them directly. **No OS source change.**
-3. This is the **only OS-specific module.** For a different OS, only O2 changes.
-4. **No disambiguation needed:** keyboard scancodes and mouse packets arrive on
-   **separate streams** (`g_adapter_kbd_stream` / `g_adapter_mouse_stream`), so O2
-   parses each independently. There is no heuristic that could misroute a keyboard
-   scancode (e.g. Esc = 0x01, digits 1-6 = 0x02-0x07) as a mouse packet.
-
-> **O2 is a stub for the reference OS.** The Firmware Coder implements the TempleOS
-> hook. A second-OS O2 is a separate portability-demo task (see §6).
+> **O2 (input injection) is no longer a separate module.** In the virtual-port design,
+> the OS's own PS/2 driver reads the virtual port directly and feeds its existing input
+> path — there is no separate injection adapter. The only OS-side change is the
+> read-and-clear at the data-read sites (documented above, implemented in the OS, not
+> in this repo).
 
 ---
 
@@ -475,29 +461,30 @@ EFI_STATUS uefi_bringup_highest_core(void);
    - Send INIT IPI (vector 0xC4500) then STARTUP IPI (0xC4600 + MPN_VECT), per the
      reference OS's `MultiProc.HC` conventions.
    - The AP starts executing the bridge entry (`bridge_entry`, B5) in its own context.
-5. **Load the input adapter** into the reserved region on core 0 (for O1/O2).
+5. **Load the input adapter** into the reserved region on core 0 (for O1).
 
 ### 4.3 U3 — Memory reservation (`src/uefi/mem_reserve.c`)
 
-**Responsibility:** Allocate bridge + mailbox; mark reserved.
+**Responsibility:** Allocate bridge + virtual port region; mark reserved.
 
 **Public interface (already in `src/uefi/uefi.h`):**
 ```c
-EFI_STATUS uefi_reserve_memory(MAILBOX **out_kbd_mailbox,
-                               MAILBOX **out_mouse_mailbox);
+EFI_STATUS uefi_reserve_memory(void);
 ```
 
 **Required implementation steps:**
-1. Allocate a page for each `MAILBOX` (keyboard + mouse, on separate rings) via
-   `AllocatePages` with `EfiReservedMemoryType`. Initialize each (`mailbox_init`) and
-   publish them (`mailbox_publish_kbd` / `mailbox_publish_mouse`).
+1. Reserve the **virtual 8042 port region** at `VIRTUAL_PS2_BASE` (0x10000030) — a
+   small fixed region holding the status and data registers (see
+   `include/virtual_ps2.h`). Mark it `EfiReservedMemoryType` so the OS never allocates
+   over it.
 2. Allocate + reserve the bridge code region and the `USB_TOPOLOGY` region with
    `EfiReservedMemoryType`.
 3. **Critical (TempleOS / E820-collecting OS):** `EfiReservedMemoryType` alone is NOT
    sufficient. The region must also be carved out of the E820 map the OS collects, or
    placed **above** the OS's physical memory space so it never allocates over it.
    (See architecture.md §9 risk row.)
-4. Return the mailbox pointers via `*out_kbd_mailbox` and `*out_mouse_mailbox`.
+4. The virtual port region is a **fixed address** (not a returned pointer) so the OS's
+   PS/2 driver can reference it directly without a lookup.
 
 ---
 
@@ -545,22 +532,22 @@ Implement in dependency order. Each task is independently verifiable.
 
 | # | Task | Module | Files | Depends on | Verify |
 |---|------|--------|-------|------------|--------|
-| 1 | Mailbox ABI (already done) | — | `include/mailbox.h`, `src/common/mailbox.c` | — | Layer 0 host test |
+| 1 | Virtual 8042 port ABI (already done) | — | `include/virtual_ps2.h`, `src/bridge/virtual_ps2_writer.c` | — | Layer 0 host test |
 | 2 | HID → PS/2 translator | B3 | `src/bridge/hid_ps2.c` | — | Layer 0 host test (pure C) |
 | 3 | HID report parser | B2 | `src/bridge/hid_parser.c` | — | Layer 0 host test (pure C) |
-| 4 | Mailbox writer | B4 | `src/bridge/mailbox_writer.c` | 1 | Layer 0 host test |
-| 5 | Mailbox reader | O1 | `src/adapter/mailbox_reader.c` | 1 | Layer 0 host test |
+| 4 | Virtual port writer | B4 | `src/bridge/virtual_ps2_writer.c` | 1 | Layer 0 host test |
+| 5 | Virtual port reader | O1 | `src/adapter/virtual_ps2_reader.c` | 1 | Layer 0 host test |
 | 6 | XHCI periodic-IN driver | B1 | `src/bridge/xhci.c` | 1, U1 | Layer 1 (QEMU + real HW) |
 | 7 | USB topology discovery | U1 | `src/uefi/usb_discovery.c` | — | Layer 1 |
 | 8 | Memory reservation | U3 | `src/uefi/mem_reserve.c` | 1 | Layer 1 |
 | 9 | Highest-core bring-up + TDM | U2, B5 | `src/uefi/core_bringup.c`, `src/bridge/bridge_entry.c`, `src/bridge/tdm.h` | 6,7,8 | Layer 1 (real HW) |
-| 10 | Input injection (TempleOS) | O2 | `src/adapter/input_inject.c` | 5 | Layer 2 (stub queue) |
-| 11 | Second-OS adapter (portability demo) | O2' | new | 10 | Layer 2 |
+| 10 | OS PS/2 driver read-and-clear (in the OS, not this repo) | O1 | OS source | 5 | Layer 3 (OS boot) |
+| 11 | Second-OS virtual-port reader (portability demo) | O1' | new | 5 | Layer 2 |
 
 **Verification layers** (from architecture.md §9):
 - **Layer 0:** host unit tests, no QEMU/OS — B2, B3, B4, O1 logic.
-- **Layer 1:** UEFI app + bridge, no OS — B1–B5, U1–U3, O1. QEMU/OVMF + real hardware.
-- **Layer 2:** O2 against a stub input queue — real hardware.
+- **Layer 1:** UEFI app + bridge, no OS — B1–B5, U1–U3. QEMU/OVMF + real hardware.
+- **Layer 2:** O1 read against a stub PS/2 driver — real hardware.
 - **Layer 3:** end-to-end OS boot (optional, final).
 
 ---
@@ -662,19 +649,20 @@ The implementation is complete when:
 
 1. **Builds clean:** `make -C /workspaces/USB-Serial-Bridge` produces `build/bridge.efi`
    with no warnings/errors.
-2. **Layer 0 passes:** host unit tests for B2, B3, B4, O1 (mailbox ring correctness,
-   HID→PS/2 translation, make/break, 0xE0 extended, mouse packets).
+2. **Layer 0 passes:** host unit tests for B2, B3, B4, O1 (virtual port read/write
+   correctness, HID→PS/2 translation, make/break, 0xE0 extended, mouse packets).
 3. **Layer 1 passes (QEMU + real hardware):** the UEFI app enumerates USB kbd/mouse,
-   reserves memory, SIPI-starts the highest core, and the harness on core 0 drains the
-   mailbox and asserts the PS/2 byte stream — with **no OS loaded**.
-4. **Layer 2 passes (real hardware):** O2 injects into a stub input queue correctly.
-5. **Interface matches spec:** the mailbox ABI (§6 of architecture.md) is unchanged and
-   the byte-stream format is exactly PS/2 Set 1 + 3-byte mouse packets. Validated by the
-   Architect.
+   reserves memory, SIPI-starts the highest core, and the harness on core 0 reads the
+   virtual port region and asserts the PS/2 byte stream — with **no OS loaded**.
+4. **Layer 2 passes (real hardware):** O1 read-and-clear against a stub PS/2 driver
+   works correctly.
+5. **Interface matches spec:** the virtual 8042 port ABI (§6 of architecture.md) is
+   unchanged and the byte-stream format is exactly PS/2 Set 1 + 3-byte mouse packets.
+   Validated by the Architect.
 6. **XHCI ≥ 1.0 only (C6):** verified at boot; clean abort if not XHCI ≥ 1.0. No
    SuperSpeed, no EHCI/UHCI/OHCI.
-7. **OS-independent:** only O2 is OS-specific; the bridge + ABI are untouched for a
-   different OS.
+7. **OS-independent:** only the OS-side read-and-clear (O1) is OS-specific; the bridge
+   + virtual port ABI are untouched for a different OS.
 
 ---
 
@@ -685,7 +673,7 @@ The implementation is complete when:
    directly (recorded BAR0/CAPLENGTH from U1).
 2. **Full Set 1 scancode table:** fill the complete HID-usage → Set 1 table and verify
    against the reference OS's `NORMAL_KEY_SCAN_DECODE_TABLE`.
-3. **Mailbox overflow policy:** confirm the drop-oldest policy is acceptable (consumer
-   drains fast, so overflow is unlikely).
+3. **Virtual port consumption handshake:** confirm the OS's PS/2 driver data reads are
+   read-and-clear (a pure load does not clear the status bit, unlike a real 8042).
 4. **TDM slot length:** choose a slot length (e.g. 1–5 ms) that gives the bridge enough
    time to poll USB without starving the OS background task.
