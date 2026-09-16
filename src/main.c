@@ -61,6 +61,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         return status;
     }
 
+    /* Layer 1 harness: if the bridge faulted during XHCI bring-up, print a
+     * one-screen diagnosis to the console and halt - never boot the OS. */
+    uefi_check_bridge_fault();
+
     Print(L"Bridge setup complete. Handing off to OS on core 0.\n");
 
     /* 5. Hand off to the bootloader / OS on the BSP (core 0). */

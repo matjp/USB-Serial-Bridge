@@ -54,7 +54,8 @@ LDFLAGS         := -nostdlib -znocombreloc -T linker.lds -shared -Bsymbolic \
 APP_SRCS        := src/main.c \
                    src/uefi/usb_discovery.c \
                    src/uefi/core_bringup.c \
-                   src/uefi/mem_reserve.c
+                   src/uefi/mem_reserve.c \
+                   src/uefi/l1_harness.c
 
 # Bridge core code (Phase 2): B1-B5
 BRIDGE_SRCS     := src/bridge/xhci.c \

@@ -24,4 +24,9 @@ EFI_STATUS uefi_reserve_memory(MAILBOX **out_kbd_mailbox,
 /* U2: Bring up the highest core via SIPI, loading the bridge code. */
 EFI_STATUS uefi_bringup_highest_core(void);
 
+/* Layer 1 harness: after bridge bring-up, check the XHCI fault record. If the
+ * bridge faulted, print a one-screen diagnosis to ConOut and halt (never boot
+ * the OS). Returns normally if the bridge is healthy. */
+void uefi_check_bridge_fault(void);
+
 #endif /* UEFI_H */

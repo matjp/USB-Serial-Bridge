@@ -421,6 +421,13 @@ design is proven before it.
   failure is diagnosed precisely (which step, what the controller said) rather than as
   a generic halt. This is where the open item (root-hub port number not recorded by U1)
   is confirmed/fixed on real hardware.
+- **How the report is surfaced:** modern PCs have no physical serial port, so the UEFI
+  console (ConOut) is the output channel. After the bridge is SIPI-started, the app calls
+  `uefi_check_bridge_fault()` (`src/uefi/l1_harness.c`): it waits (bounded) for the bridge
+  to publish its fault record, and if the record's magic is set, prints a compact
+  diagnosis (stage, hint, `USBSTS`/`USBCMD`/`CRCR`) to the console and halts — it never
+  boots the OS. The output fits the UEFI-guaranteed 80×25 console (mode 0), so it stays
+  on one screen. If the bridge is healthy, the app proceeds to hand off to the OS.
 - This covers B1, B2, B3, B4, B5, U1, U2, U3, and O1 — the entire bridge and boot-time
   path — without an OS, on both QEMU and real hardware.
 

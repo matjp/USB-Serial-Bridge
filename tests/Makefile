@@ -56,14 +56,21 @@ OBJS_L2 := $(SRCS_L2:../src/%.c=build/%.o)
 
 TARGET_L2 := build/test_layer2
 
+# --- Layer 1 fault-record test: exercises the XHCI_FAULT publish/lookup
+# transport (src/bridge/xhci_fault.h) on the host. Hardware-independent.
+TARGET_L1F := build/test_layer1_fault
+
 .PHONY: all run clean
 
-all: $(TARGET) $(TARGET_L2)
+all: $(TARGET) $(TARGET_L2) $(TARGET_L1F)
 
 $(TARGET): $(OBJS) build/test_layer0.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TARGET_L2): $(OBJS_L2) build/test_layer2.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET_L1F): build/test_layer1_fault.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 build/%.o: ../src/%.c
@@ -82,9 +89,14 @@ build/test_layer2.o: test_layer2.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+build/test_layer1_fault.o: test_layer1_fault.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 run: all
 	./$(TARGET)
 	./$(TARGET_L2)
+	./$(TARGET_L1F)
 
 clean:
 	rm -rf build

@@ -188,7 +188,14 @@ typedef struct {
 - **Poll-stage errors:** a non-success completion code is recorded (stage = poll) but
   does NOT halt the bridge — a transient error on one endpoint should not kill the
   whole bridge.
-- The harness prints a human-readable diagnosis from the record (stage + hint + regs).
+- **Console readout (`src/uefi/l1_harness.c`):** after the bridge is SIPI-started, the
+  UEFI app calls `uefi_check_bridge_fault()`. It waits (bounded) for the bridge to
+  publish its fault record, and if the record's magic is set, prints a compact,
+  human-readable diagnosis to the UEFI console (ConOut) and halts — it never boots the
+  OS. The output is kept to ~12 lines to fit the UEFI-guaranteed 80×25 console (mode 0).
+  If the bridge is healthy, the app proceeds to hand off to the OS. This is the primary
+  (and on modern PCs, only) output channel — physical serial ports are gone, so ConOut
+  is the surface.
 
 ### 2.2 B2 — HID report parser (`src/bridge/hid_parser.c`)
 
