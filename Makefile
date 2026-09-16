@@ -61,7 +61,8 @@ BRIDGE_SRCS     := src/bridge/xhci.c \
                    src/bridge/hid_parser.c \
                    src/bridge/hid_ps2.c \
                    src/bridge/mailbox_writer.c \
-                   src/bridge/bridge_entry.c
+                   src/bridge/bridge_entry.c \
+                   src/bridge/tdm.c
 
 # Input adapter (per-OS): O1-O2
 ADAPTER_SRCS    := src/adapter/mailbox_reader.c \

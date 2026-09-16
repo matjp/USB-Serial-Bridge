@@ -16,6 +16,10 @@
 /* B1: Poll the two interrupt IN endpoints, produce raw HID reports. */
 void bridge_poll_usb(void);
 
+/* B1: Return TRUE if the USB controller is unusable (non-XHCI>=1.0 or a
+ * fatal fault). The bridge halts cleanly when this is set. */
+BOOLEAN bridge_usb_fatal(void);
+
 /* B2: Parse raw HID reports into key/mouse events. */
 void bridge_parse_hid(void);
 

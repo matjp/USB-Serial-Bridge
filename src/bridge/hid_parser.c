@@ -16,18 +16,12 @@
 #include "hid_event.h"
 
 /* ------------------------------------------------------------------ */
-/* B1 (xhci.c) will define these; declared extern here.               */
+/* B1 (xhci.c) defines these; declared extern here.                    */
 /* ------------------------------------------------------------------ */
 extern HID_KBD_REPORT   g_raw_kbd;    /* 8 bytes */
 extern HID_MOUSE_REPORT g_raw_mouse;  /* 3 bytes */
 extern BOOLEAN g_kbd_valid;           /* set when a fresh kbd report is ready */
 extern BOOLEAN g_mouse_valid;         /* set when a fresh mouse report is ready */
-
-/* TEMP: B1 will define these; remove when B1 lands. */
-HID_KBD_REPORT   g_raw_kbd;
-HID_MOUSE_REPORT g_raw_mouse;
-BOOLEAN g_kbd_valid   = FALSE;
-BOOLEAN g_mouse_valid = FALSE;
 
 /* Internal event queue consumed by B3. */
 HID_EVENT_QUEUE g_hid_events;

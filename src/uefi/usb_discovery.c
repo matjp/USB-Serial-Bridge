@@ -12,27 +12,268 @@
 
 #include <efi.h>
 #include <efilib.h>
+#include <efipciio.h>
 
 #include "uefi.h"
+#include "efiusb.h"
+#include "../bridge/usb_topology.h"
 
-/* Verify the host controller is XHCI >= 1.0 (C6).
- * Checks the XHCI spec version via the EFI_USB2_HC_PROTOCOL revision, or the
- * XHCI capability registers (HCSPARAMS1/HCCPARAMS) once the controller is
- * located. Aborts cleanly if not XHCI >= 1.0 - no EHCI/UHCI/OHCI fallback. */
+/* The discovered fixed topology. U1 fills this; U3 copies it into the
+ * reserved region and publishes its address (see usb_topology.h). */
+USB_TOPOLOGY g_usb_topology;
+
+/* XHCI MMIO base (BAR0) and CAPLENGTH, recorded by uefi_verify_xhci() via
+ * the PCI walk and consumed by uefi_discover_usb() to fill the topology. */
+static UINT32 g_xhci_mmio_base;
+static UINT32 g_xhci_cap_len;
+
+/* ------------------------------------------------------------------ */
+/* PCI helpers                                                         */
+/* ------------------------------------------------------------------ */
+
+/* Read a 32-bit PCI config register for the given bus/device/function via
+ * the EFI_PCI_IO_PROTOCOL. Returns EFI_SUCCESS on success. */
+static EFI_STATUS
+pci_read_config32(EFI_PCI_IO_PROTOCOL *pci, UINT32 offset, UINT32 *value)
+{
+    return pci->Pci.Read(pci, EfiPciIoWidthUint32, offset, 1, value);
+}
+
+/* ------------------------------------------------------------------ */
+/* XHCI capability-register helpers (MMIO)                             */
+/* ------------------------------------------------------------------ */
+
+/* Read a 32-bit XHCI capability register at the given offset from the
+ * MMIO base. */
+static UINT32
+xhci_cap_read32(UINT32 mmio_base, UINT32 offset)
+{
+    volatile UINT32 *reg = (volatile UINT32 *)(UINTN)(mmio_base + offset);
+    return *reg;
+}
+
+/* ------------------------------------------------------------------ */
+/* uefi_verify_xhci(): verify the host controller is XHCI >= 1.0 (C6).  */
+/*                                                                     */
+/* Preferred path: walk PCI for a device with class code 0x0C0330       */
+/* (USB 3.0 xHCI), read BAR0 (MMIO base) and the XHCI capability         */
+/* registers, and check the spec version in HCCPARAMS1 bits 31:24       */
+/* (>= 0x10 for 1.0).                                                   */
+/*                                                                     */
+/* Alternative path: locate EFI_USB2_HC_PROTOCOL and check Revision     */
+/* >= 0x00010000.                                                       */
+/*                                                                     */
+/* Returns EFI_SUCCESS if XHCI >= 1.0, else EFI_UNSUPPORTED. No         */
+/* EHCI/UHCI/OHCI fallback.                                             */
+/* ------------------------------------------------------------------ */
 EFI_STATUS
 uefi_verify_xhci(void)
 {
-    /* TODO(Firmware Coder): locate the XHCI controller and verify its spec
-     * version is >= 1.0. Return EFI_UNSUPPORTED if not. */
-    return EFI_SUCCESS;
+    EFI_STATUS status;
+    EFI_HANDLE *handles = NULL;
+    UINTN num_handles = 0;
+    UINTN i;
+    EFI_PCI_IO_PROTOCOL *pci = NULL;
+    UINT32 class_code = 0;
+    UINT32 bar0 = 0;
+    UINT32 cap_len = 0;
+    UINT32 hccparams1 = 0;
+    UINT32 spec_version = 0;
+
+    /* --- Preferred path: PCI walk for class code 0x0C0330 (xHCI). --- */
+    status = uefi_call_wrapper(
+        BS->LocateHandleBuffer, 5,
+        ByProtocol, &gEfiPciIoProtocolGuid, NULL, &num_handles, &handles);
+    if (EFI_ERROR(status) || num_handles == 0) {
+        /* No PCI IO protocol handles - fall through to the USB2_HC path. */
+        goto alt_path;
+    }
+
+    for (i = 0; i < num_handles; i++) {
+        status = uefi_call_wrapper(
+            BS->HandleProtocol, 3,
+            handles[i], &gEfiPciIoProtocolGuid, (VOID **)&pci);
+        if (EFI_ERROR(status) || pci == NULL)
+            continue;
+
+        /* Read the class code at config offset 0x08 (registers 0x08-0x0B:
+         * 0x08 = revision, 0x09 = prog-if, 0x0A = subclass, 0x0B = base
+         * class). The 32-bit read at 0x08 gives base<<24 | sub<<16 |
+         * progif<<8 | rev. We want base=0x0C, sub=0x03, progif=0x30. */
+        status = pci_read_config32(pci, 0x08, &class_code);
+        if (EFI_ERROR(status))
+            continue;
+
+        /* class_code = rev | (progif<<8) | (subclass<<16) | (baseclass<<24).
+         * xHCI: baseclass=0x0C, subclass=0x03, progif=0x30. */
+        if (((class_code >> 24) & 0xFF) == 0x0C &&
+            ((class_code >> 16) & 0xFF) == 0x03 &&
+            ((class_code >> 8)  & 0xFF) == 0x30) {
+            /* Found the xHCI controller. Read BAR0 (config offset 0x10). */
+            status = pci_read_config32(pci, 0x10, &bar0);
+            if (EFI_ERROR(status))
+                continue;
+
+            /* BAR0 is a 64-bit MMIO BAR; the low 32 bits hold the base
+             * (bits 31:4) with the low 4 bits as BAR attributes. Mask off
+             * the attribute bits to get the MMIO base. */
+            g_xhci_mmio_base = bar0 & 0xFFFFFFF0u;
+
+            /* CAPLENGTH is the low byte of the first capability register
+             * (offset 0x00 of the MMIO space). */
+            cap_len = xhci_cap_read32(g_xhci_mmio_base, 0x00) & 0xFF;
+            g_xhci_cap_len = cap_len;
+
+            /* HCCPARAMS1 is at capability offset 0x10. The XHCI spec
+             * version is in bits 31:24 (0x10 = 1.0). */
+            hccparams1 = xhci_cap_read32(g_xhci_mmio_base, cap_len + 0x10);
+            spec_version = (hccparams1 >> 24) & 0xFF;
+
+            if (spec_version >= 0x10) {
+                /* XHCI >= 1.0 (C6). */
+                if (handles)
+                    FreePool(handles);
+                return EFI_SUCCESS;
+            }
+            /* Found an xHCI but it is < 1.0 - unsupported. */
+            if (handles)
+                FreePool(handles);
+            return EFI_UNSUPPORTED;
+        }
+    }
+
+    if (handles)
+        FreePool(handles);
+
+alt_path:
+    /* --- Alternative path: EFI_USB2_HC_PROTOCOL revision check. --- */
+    {
+        EFI_USB2_HC_PROTOCOL *hc = NULL;
+        status = uefi_call_wrapper(
+            BS->LocateProtocol, 3,
+            &EFI_USB2_HC_PROTOCOL_GUID, NULL, (VOID **)&hc);
+        if (EFI_ERROR(status) || hc == NULL)
+            return EFI_UNSUPPORTED;
+
+        if (hc->Revision >= 0x00010000) {
+            /* USB 2.0 protocol revision implies XHCI 1.0. */
+            return EFI_SUCCESS;
+        }
+    }
+
+    return EFI_UNSUPPORTED;
 }
 
-/* Enumerate the single USB keyboard and mouse, record their endpoints. */
+/* ------------------------------------------------------------------ */
+/* uefi_discover_usb(): find the single boot-protocol keyboard and      */
+/* mouse, record their interrupt IN endpoints into g_usb_topology.      */
+/* ------------------------------------------------------------------ */
 EFI_STATUS
 uefi_discover_usb(void)
 {
-    /* TODO(Firmware Coder): walk the USB tree via EFI_USB2_HC_PROTOCOL /
-     * EFI_USB_IO_PROTOCOL, find the boot-protocol keyboard and mouse, and
-     * record their interrupt IN endpoints for the bridge (B1). */
+    EFI_STATUS status;
+    EFI_HANDLE *handles = NULL;
+    UINTN num_handles = 0;
+    UINTN i;
+    EFI_USB_IO_PROTOCOL *usbio = NULL;
+    EFI_USB_DEVICE_DESCRIPTOR dev_desc;
+    EFI_USB_INTERFACE_DESCRIPTOR iface_desc;
+    EFI_USB_ENDPOINT_DESCRIPTOR ep_desc;
+    UINTN iface_idx, ep_idx;
+    BOOLEAN found_kbd = FALSE;
+    BOOLEAN found_mouse = FALSE;
+    UINT8 speed = 0;
+    UINT8 next_addr = 1;   /* UEFI USB stack assigns addresses 1,2,... */
+
+    /* Record the XHCI MMIO base + CAPLENGTH from uefi_verify_xhci(). */
+    g_usb_topology.xhci_mmio_base = g_xhci_mmio_base;
+    g_usb_topology.xhci_cap_len   = g_xhci_cap_len;
+
+    /* Locate all USB device handles (each exposes EFI_USB_IO_PROTOCOL). */
+    status = uefi_call_wrapper(
+        BS->LocateHandleBuffer, 5,
+        ByProtocol, &EFI_USB_IO_PROTOCOL_GUID, NULL, &num_handles, &handles);
+    if (EFI_ERROR(status) || num_handles == 0) {
+        if (handles)
+            FreePool(handles);
+        return EFI_NOT_FOUND;
+    }
+
+    for (i = 0; i < num_handles; i++) {
+        status = uefi_call_wrapper(
+            BS->HandleProtocol, 3,
+            handles[i], &EFI_USB_IO_PROTOCOL_GUID, (VOID **)&usbio);
+        if (EFI_ERROR(status) || usbio == NULL)
+            continue;
+
+        /* Read the device descriptor to get the device address. */
+        status = uefi_call_wrapper(usbio->GetDeviceDescriptor, 2, usbio, &dev_desc);
+        if (EFI_ERROR(status))
+            continue;
+
+        /* Walk interfaces to find a boot-protocol HID interface. */
+        for (iface_idx = 0; iface_idx < 16; iface_idx++) {
+            status = uefi_call_wrapper(
+                usbio->GetInterfaceDescriptor, 3, usbio, iface_idx, &iface_desc);
+            if (EFI_ERROR(status))
+                break;   /* no more interfaces */
+
+            /* Boot-protocol HID: class 3, subclass 1 (boot), protocol 1
+             * (keyboard) or 2 (mouse). */
+            if (iface_desc.InterfaceClass != USB_CLASS_HID ||
+                iface_desc.InterfaceSubClass != USB_HID_SUBCLASS_BOOT)
+                continue;
+
+            /* Find the interrupt IN endpoint on this interface. */
+            for (ep_idx = 0; ep_idx < iface_desc.NumEndpoints; ep_idx++) {
+                status = uefi_call_wrapper(
+                    usbio->GetEndpointDescriptor, 4,
+                    usbio, iface_idx, ep_idx, &ep_desc);
+                if (EFI_ERROR(status))
+                    break;
+
+                /* Interrupt endpoint, IN direction. */
+                if ((ep_desc.Attributes & USB_ENDPOINT_TYPE_MASK) !=
+                        USB_ENDPOINT_TYPE_INTERRUPT)
+                    continue;
+                if ((ep_desc.EndpointAddress & USB_ENDPOINT_DIR_IN) == 0)
+                    continue;
+
+                /* Determine speed from the device descriptor's
+                 * MaxPacketSize0 (8=low, 64=full) - a reasonable proxy for
+                 * low/full speed HID devices. */
+                speed = (dev_desc.MaxPacketSize0 <= 8) ? 1 : 0;
+
+                if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_KEYBOARD &&
+                    !found_kbd) {
+                    g_usb_topology.kbd.device_addr = next_addr++;
+                    g_usb_topology.kbd.endpoint    = ep_desc.EndpointAddress;
+                    g_usb_topology.kbd.interval    = ep_desc.Interval;
+                    g_usb_topology.kbd.max_packet  = ep_desc.MaxPacketSize;
+                    g_usb_topology.kbd.speed       = speed;
+                    found_kbd = TRUE;
+                } else if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_MOUSE &&
+                           !found_mouse) {
+                    g_usb_topology.mouse.device_addr = next_addr++;
+                    g_usb_topology.mouse.endpoint    = ep_desc.EndpointAddress;
+                    g_usb_topology.mouse.interval    = ep_desc.Interval;
+                    g_usb_topology.mouse.max_packet  = ep_desc.MaxPacketSize;
+                    g_usb_topology.mouse.speed       = speed;
+                    found_mouse = TRUE;
+                }
+                break;   /* one interrupt IN endpoint per interface is enough */
+            }
+        }
+
+        if (found_kbd && found_mouse)
+            break;
+    }
+
+    if (handles)
+        FreePool(handles);
+
+    if (!found_kbd || !found_mouse)
+        return EFI_NOT_FOUND;
+
     return EFI_SUCCESS;
 }
