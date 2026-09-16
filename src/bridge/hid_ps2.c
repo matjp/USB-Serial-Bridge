@@ -162,16 +162,28 @@ static const PS2_MOD_MAP g_ps2_mods[] = {
     {0xE7, 0x5C, TRUE},  /* RGui   */
 };
 
-/* Internal PS/2 output stream consumed by B4. */
-PS2_STREAM g_ps2_stream;
+/* Internal PS/2 output streams consumed by B4. Keyboard and mouse are kept
+ * on separate streams (and, downstream, on separate mailbox rings) so the
+ * two byte streams are never ambiguous. */
+PS2_STREAM g_ps2_kbd_stream;
+PS2_STREAM g_ps2_mouse_stream;
 
-/* Append one byte to the output stream, dropping it if the stream is full
- * (never corrupts the buffer). */
+/* Append one byte to the keyboard output stream, dropping it if the stream
+ * is full (never corrupts the buffer). */
 static void
-stream_put(UINT8 byte)
+kbd_put(UINT8 byte)
 {
-    if (g_ps2_stream.count < PS2_STREAM_MAX)
-        g_ps2_stream.bytes[g_ps2_stream.count++] = byte;
+    if (g_ps2_kbd_stream.count < PS2_STREAM_MAX)
+        g_ps2_kbd_stream.bytes[g_ps2_kbd_stream.count++] = byte;
+}
+
+/* Append one byte to the mouse output stream, dropping it if the stream is
+ * full (never corrupts the buffer). */
+static void
+mouse_put(UINT8 byte)
+{
+    if (g_ps2_mouse_stream.count < PS2_STREAM_MAX)
+        g_ps2_mouse_stream.bytes[g_ps2_mouse_stream.count++] = byte;
 }
 
 /* Emit one key make/break sequence for a Set 1 scancode.
@@ -184,11 +196,11 @@ static void
 emit_key(UINT8 scancode, BOOLEAN extended, BOOLEAN make)
 {
     if (extended)
-        stream_put(PS2_EXT_PREFIX);
+        kbd_put(PS2_EXT_PREFIX);
     if (make)
-        stream_put(scancode);
+        kbd_put(scancode);
     else
-        stream_put((UINT8)(scancode | PS2_BREAK_BIT));
+        kbd_put((UINT8)(scancode | PS2_BREAK_BIT));
 }
 
 void
@@ -221,11 +233,12 @@ bridge_translate_ps2(void)
         }
     }
 
-    /* Mouse: assemble the 3-byte packet [buttons, dx, dy]. */
+    /* Mouse: assemble the 3-byte packet [buttons, dx, dy] into the mouse
+     * stream (separate from the keyboard stream). */
     if (g_hid_events.mouse_valid) {
-        stream_put(g_hid_events.mouse.buttons);
-        stream_put((UINT8)g_hid_events.mouse.dx);
-        stream_put((UINT8)g_hid_events.mouse.dy);
+        mouse_put(g_hid_events.mouse.buttons);
+        mouse_put((UINT8)g_hid_events.mouse.dx);
+        mouse_put((UINT8)g_hid_events.mouse.dy);
     }
 
     /* Consume the event queue. */

@@ -12,9 +12,14 @@
 
 #include <mailbox.h>
 
-/* Fixed physical address where the UEFI app publishes the mailbox base.
- * Chosen to be well above typical low memory; the app reserves this page. */
-#define MAILBOX_PTR_ADDR  0x10000000ULL
+/* Fixed physical addresses where the UEFI app publishes the mailbox base
+ * addresses. Chosen to be well above typical low memory; the app reserves
+ * these pages. The keyboard and mouse mailboxes are separate rings (see
+ * include/mailbox.h). The USB_TOPOLOGY pointer lives at 0x10000008 (see
+ * src/bridge/usb_topology.h), so the mouse mailbox pointer is placed at
+ * 0x10000010 to avoid collision. */
+#define MAILBOX_KBD_PTR_ADDR   0x10000000ULL
+#define MAILBOX_MOUSE_PTR_ADDR 0x10000010ULL
 
 void
 mailbox_init(MAILBOX *mb)
@@ -23,18 +28,34 @@ mailbox_init(MAILBOX *mb)
     mb->tail = 0;
 }
 
-/* Publish the mailbox base address at the fixed pointer location. */
+/* Publish the keyboard mailbox base address at the fixed pointer location. */
 void
-mailbox_publish(MAILBOX *mb)
+mailbox_publish_kbd(MAILBOX *mb)
 {
-    volatile UINT64 *slot = (volatile UINT64 *)MAILBOX_PTR_ADDR;
+    volatile UINT64 *slot = (volatile UINT64 *)MAILBOX_KBD_PTR_ADDR;
     *slot = (UINT64)(UINTN)mb;
 }
 
-/* Read the published mailbox base address (returns NULL if not published). */
-MAILBOX *
-mailbox_lookup(void)
+/* Publish the mouse mailbox base address at the fixed pointer location. */
+void
+mailbox_publish_mouse(MAILBOX *mb)
 {
-    volatile UINT64 *slot = (volatile UINT64 *)MAILBOX_PTR_ADDR;
+    volatile UINT64 *slot = (volatile UINT64 *)MAILBOX_MOUSE_PTR_ADDR;
+    *slot = (UINT64)(UINTN)mb;
+}
+
+/* Read the published keyboard mailbox base address (NULL if not published). */
+MAILBOX *
+mailbox_lookup_kbd(void)
+{
+    volatile UINT64 *slot = (volatile UINT64 *)MAILBOX_KBD_PTR_ADDR;
+    return (MAILBOX *)(UINTN)*slot;
+}
+
+/* Read the published mouse mailbox base address (NULL if not published). */
+MAILBOX *
+mailbox_lookup_mouse(void)
+{
+    volatile UINT64 *slot = (volatile UINT64 *)MAILBOX_MOUSE_PTR_ADDR;
     return (MAILBOX *)(UINTN)*slot;
 }

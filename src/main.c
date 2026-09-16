@@ -22,7 +22,8 @@ EFIAPI
 efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 {
     EFI_STATUS status;
-    MAILBOX *mailbox;
+    MAILBOX *kbd_mailbox;
+    MAILBOX *mouse_mailbox;
 
     InitializeLib(image, systab);
 
@@ -43,13 +44,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     }
 
     /* 3. Allocate + reserve the bridge and mailbox regions (U3). */
-    status = uefi_reserve_memory(&mailbox);
+    status = uefi_reserve_memory(&kbd_mailbox, &mouse_mailbox);
     if (EFI_ERROR(status)) {
         Print(L"ERROR: memory reservation failed (status %r)\n", status);
         return status;
     }
-    mailbox_init(mailbox);
-    mailbox_publish(mailbox);
+    mailbox_init(kbd_mailbox);
+    mailbox_init(mouse_mailbox);
+    mailbox_publish_kbd(kbd_mailbox);
+    mailbox_publish_mouse(mouse_mailbox);
 
     /* 4. Bring up the highest core via SIPI, loading the bridge code (U2). */
     status = uefi_bringup_highest_core();

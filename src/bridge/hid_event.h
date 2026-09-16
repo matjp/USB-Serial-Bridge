@@ -44,7 +44,10 @@ typedef struct {
 
 extern HID_EVENT_QUEUE g_hid_events;
 
-/* Internal PS/2 output stream produced by B3, consumed by B4. */
+/* Internal PS/2 output streams produced by B3, consumed by B4.
+ *
+ * The keyboard and mouse are kept on SEPARATE streams (and, downstream, on
+ * separate mailbox rings) so the two byte streams are never ambiguous. */
 #define PS2_STREAM_MAX 32
 
 typedef struct {
@@ -52,6 +55,10 @@ typedef struct {
     UINTN  count;
 } PS2_STREAM;
 
-extern PS2_STREAM g_ps2_stream;
+/* Keyboard: PS/2 Set 1 scancodes (make/break, 0xE0-prefixed extended). */
+extern PS2_STREAM g_ps2_kbd_stream;
+
+/* Mouse: 3-byte packets [buttons, dx, dy]. */
+extern PS2_STREAM g_ps2_mouse_stream;
 
 #endif /* HID_EVENT_H */

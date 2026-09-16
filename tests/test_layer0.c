@@ -34,13 +34,14 @@ extern HID_MOUSE_REPORT g_raw_mouse;
 extern BOOLEAN g_kbd_valid;
 extern BOOLEAN g_mouse_valid;
 
-/* O1 (mailbox_reader.c) defines the drained byte stream. The ADAPTER_STREAM
+/* O1 (mailbox_reader.c) defines the drained byte streams. The ADAPTER_STREAM
  * type is file-local there, so we mirror its layout here for the test. */
 typedef struct {
     UINT8  bytes[MAILBOX_RING_SIZE];
     UINTN  count;
 } ADAPTER_STREAM;
-extern ADAPTER_STREAM g_adapter_stream;
+extern ADAPTER_STREAM g_adapter_kbd_stream;
+extern ADAPTER_STREAM g_adapter_mouse_stream;
 
 /* ------------------------------------------------------------------ */
 /* Minimal test framework                                              */
@@ -84,7 +85,8 @@ reset_bridge_state(void)
     memset(&g_raw_mouse, 0, sizeof(g_raw_mouse));
     g_hid_events.key_count   = 0;
     g_hid_events.mouse_valid = FALSE;
-    g_ps2_stream.count       = 0;
+    g_ps2_kbd_stream.count   = 0;
+    g_ps2_mouse_stream.count = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -236,9 +238,10 @@ test_b3_translate(void)
     g_hid_events.keys[0].make  = TRUE;
     g_hid_events.key_count     = 1;
     bridge_translate_ps2();
-    CHECK(g_ps2_stream.count == 1, "'A' make emits 1 byte");
-    if (g_ps2_stream.count == 1)
-        CHECK_EQ_U8(g_ps2_stream.bytes[0], 0x1C, "'A' make scancode 0x1C");
+    CHECK(g_ps2_kbd_stream.count == 1, "'A' make emits 1 kbd byte");
+    if (g_ps2_kbd_stream.count == 1)
+        CHECK_EQ_U8(g_ps2_kbd_stream.bytes[0], 0x1C, "'A' make scancode 0x1C");
+    CHECK(g_ps2_mouse_stream.count == 0, "no mouse bytes for a key");
 
     /* Break for 'A'. */
     reset_bridge_state();
@@ -246,9 +249,9 @@ test_b3_translate(void)
     g_hid_events.keys[0].make  = FALSE;
     g_hid_events.key_count     = 1;
     bridge_translate_ps2();
-    CHECK(g_ps2_stream.count == 1, "'A' break emits 1 byte");
-    if (g_ps2_stream.count == 1)
-        CHECK_EQ_U8(g_ps2_stream.bytes[0], 0x9C, "'A' break scancode 0x9C");
+    CHECK(g_ps2_kbd_stream.count == 1, "'A' break emits 1 kbd byte");
+    if (g_ps2_kbd_stream.count == 1)
+        CHECK_EQ_U8(g_ps2_kbd_stream.bytes[0], 0x9C, "'A' break scancode 0x9C");
 
     /* Extended key: Right arrow (usage 0x4F) make = 0xE0 0x74. */
     reset_bridge_state();
@@ -256,10 +259,10 @@ test_b3_translate(void)
     g_hid_events.keys[0].make  = TRUE;
     g_hid_events.key_count     = 1;
     bridge_translate_ps2();
-    CHECK(g_ps2_stream.count == 2, "Right arrow make emits 2 bytes");
-    if (g_ps2_stream.count == 2) {
-        CHECK_EQ_U8(g_ps2_stream.bytes[0], PS2_EXT_PREFIX, "Right: 0xE0 prefix");
-        CHECK_EQ_U8(g_ps2_stream.bytes[1], 0x74, "Right: scancode 0x74");
+    CHECK(g_ps2_kbd_stream.count == 2, "Right arrow make emits 2 kbd bytes");
+    if (g_ps2_kbd_stream.count == 2) {
+        CHECK_EQ_U8(g_ps2_kbd_stream.bytes[0], PS2_EXT_PREFIX, "Right: 0xE0 prefix");
+        CHECK_EQ_U8(g_ps2_kbd_stream.bytes[1], 0x74, "Right: scancode 0x74");
     }
 
     /* Extended key break: Right arrow break = 0xE0 0xF4. */
@@ -268,25 +271,26 @@ test_b3_translate(void)
     g_hid_events.keys[0].make  = FALSE;
     g_hid_events.key_count     = 1;
     bridge_translate_ps2();
-    CHECK(g_ps2_stream.count == 2, "Right arrow break emits 2 bytes");
-    if (g_ps2_stream.count == 2) {
-        CHECK_EQ_U8(g_ps2_stream.bytes[0], PS2_EXT_PREFIX, "Right break: 0xE0");
-        CHECK_EQ_U8(g_ps2_stream.bytes[1], 0xF4, "Right break: 0xF4");
+    CHECK(g_ps2_kbd_stream.count == 2, "Right arrow break emits 2 kbd bytes");
+    if (g_ps2_kbd_stream.count == 2) {
+        CHECK_EQ_U8(g_ps2_kbd_stream.bytes[0], PS2_EXT_PREFIX, "Right break: 0xE0");
+        CHECK_EQ_U8(g_ps2_kbd_stream.bytes[1], 0xF4, "Right break: 0xF4");
     }
 
-    /* Mouse packet: [buttons, dx, dy]. */
+    /* Mouse packet: [buttons, dx, dy] goes to the mouse stream. */
     reset_bridge_state();
     g_hid_events.mouse.buttons = 0x01;
     g_hid_events.mouse.dx      = 3;
     g_hid_events.mouse.dy      = -2;
     g_hid_events.mouse_valid   = TRUE;
     bridge_translate_ps2();
-    CHECK(g_ps2_stream.count == 3, "mouse emits 3-byte packet");
-    if (g_ps2_stream.count == 3) {
-        CHECK_EQ_U8(g_ps2_stream.bytes[0], 0x01, "mouse buttons 0x01");
-        CHECK_EQ_U8(g_ps2_stream.bytes[1], 0x03, "mouse dx 3");
-        CHECK_EQ_U8(g_ps2_stream.bytes[2], 0xFE, "mouse dy -2 (0xFE)");
+    CHECK(g_ps2_mouse_stream.count == 3, "mouse emits 3-byte packet");
+    if (g_ps2_mouse_stream.count == 3) {
+        CHECK_EQ_U8(g_ps2_mouse_stream.bytes[0], 0x01, "mouse buttons 0x01");
+        CHECK_EQ_U8(g_ps2_mouse_stream.bytes[1], 0x03, "mouse dx 3");
+        CHECK_EQ_U8(g_ps2_mouse_stream.bytes[2], 0xFE, "mouse dy -2 (0xFE)");
     }
+    CHECK(g_ps2_kbd_stream.count == 0, "no kbd bytes for a mouse move");
 }
 
 /* ------------------------------------------------------------------ */
@@ -296,50 +300,57 @@ test_b3_translate(void)
 static void
 test_b4_o1_roundtrip(void)
 {
-    MAILBOX mb;
+    MAILBOX kbd_mb;
+    MAILBOX mouse_mb;
     UINTN i;
 
     printf("\n[Test 6] B4 mailbox writer + O1 mailbox reader (round-trip)\n");
 
-    mailbox_init(&mb);
+    mailbox_init(&kbd_mb);
+    mailbox_init(&mouse_mb);
     reset_bridge_state();
 
-    /* Build a small PS/2 stream: 'A' make (0x1C), 'A' break (0x9C). */
-    g_ps2_stream.bytes[0] = 0x1C;
-    g_ps2_stream.bytes[1] = 0x9C;
-    g_ps2_stream.count    = 2;
+    /* Build a small PS/2 kbd stream: 'A' make (0x1C), 'A' break (0x9C). */
+    g_ps2_kbd_stream.bytes[0] = 0x1C;
+    g_ps2_kbd_stream.bytes[1] = 0x9C;
+    g_ps2_kbd_stream.count    = 2;
 
-    /* B4: write to mailbox. */
-    bridge_write_mailbox(&mb);
-    CHECK(g_ps2_stream.count == 0, "B4 consumed the stream");
-    CHECK(mb.head == 2, "mailbox head advanced to 2");
+    /* B4: write to the two mailboxes. */
+    bridge_write_mailbox(&kbd_mb, &mouse_mb);
+    CHECK(g_ps2_kbd_stream.count == 0, "B4 consumed the kbd stream");
+    CHECK(kbd_mb.head == 2, "kbd mailbox head advanced to 2");
+    CHECK(mouse_mb.head == 0, "mouse mailbox head unchanged");
 
-    /* O1: drain the mailbox. */
-    adapter_drain_mailbox(&mb);
-    CHECK(g_adapter_stream.count == 2, "O1 drained 2 bytes");
-    if (g_adapter_stream.count == 2) {
-        CHECK_EQ_U8(g_adapter_stream.bytes[0], 0x1C, "O1 byte 0 = 0x1C");
-        CHECK_EQ_U8(g_adapter_stream.bytes[1], 0x9C, "O1 byte 1 = 0x9C");
+    /* O1: drain the two mailboxes. */
+    adapter_drain_mailbox(&kbd_mb, &mouse_mb);
+    CHECK(g_adapter_kbd_stream.count == 2, "O1 drained 2 kbd bytes");
+    if (g_adapter_kbd_stream.count == 2) {
+        CHECK_EQ_U8(g_adapter_kbd_stream.bytes[0], 0x1C, "O1 kbd byte 0 = 0x1C");
+        CHECK_EQ_U8(g_adapter_kbd_stream.bytes[1], 0x9C, "O1 kbd byte 1 = 0x9C");
     }
-    CHECK(mb.tail == mb.head, "O1 drained fully (tail == head)");
+    CHECK(g_adapter_mouse_stream.count == 0, "O1 drained 0 mouse bytes");
+    CHECK(kbd_mb.tail == kbd_mb.head, "O1 drained kbd fully (tail == head)");
 
     /* Full pipeline: B2 -> B3 -> B4 -> O1 for a key press. */
-    mailbox_init(&mb);
+    mailbox_init(&kbd_mb);
+    mailbox_init(&mouse_mb);
     reset_bridge_state();
 
     g_raw_kbd.key[0] = 0x04;   /* 'A' */
     g_kbd_valid = TRUE;
     bridge_parse_hid();        /* B2 */
     bridge_translate_ps2();    /* B3 */
-    bridge_write_mailbox(&mb); /* B4 */
-    adapter_drain_mailbox(&mb);/* O1 */
+    bridge_write_mailbox(&kbd_mb, &mouse_mb); /* B4 */
+    adapter_drain_mailbox(&kbd_mb, &mouse_mb);/* O1 */
 
-    CHECK(g_adapter_stream.count == 1, "pipeline: 1 byte for 'A' make");
-    if (g_adapter_stream.count == 1)
-        CHECK_EQ_U8(g_adapter_stream.bytes[0], 0x1C, "pipeline: 'A' make 0x1C");
+    CHECK(g_adapter_kbd_stream.count == 1, "pipeline: 1 kbd byte for 'A' make");
+    if (g_adapter_kbd_stream.count == 1)
+        CHECK_EQ_U8(g_adapter_kbd_stream.bytes[0], 0x1C, "pipeline: 'A' make 0x1C");
+    CHECK(g_adapter_mouse_stream.count == 0, "pipeline: no mouse bytes for a key");
 
     /* Full pipeline for a mouse move. */
-    mailbox_init(&mb);
+    mailbox_init(&kbd_mb);
+    mailbox_init(&mouse_mb);
     reset_bridge_state();
 
     g_raw_mouse.buttons = 0x00;
@@ -348,15 +359,16 @@ test_b4_o1_roundtrip(void)
     g_mouse_valid = TRUE;
     bridge_parse_hid();        /* B2 */
     bridge_translate_ps2();    /* B3 */
-    bridge_write_mailbox(&mb); /* B4 */
-    adapter_drain_mailbox(&mb);/* O1 */
+    bridge_write_mailbox(&kbd_mb, &mouse_mb); /* B4 */
+    adapter_drain_mailbox(&kbd_mb, &mouse_mb);/* O1 */
 
-    CHECK(g_adapter_stream.count == 3, "pipeline: 3-byte mouse packet");
-    if (g_adapter_stream.count == 3) {
-        CHECK_EQ_U8(g_adapter_stream.bytes[0], 0x00, "pipeline: mouse buttons 0");
-        CHECK_EQ_U8(g_adapter_stream.bytes[1], 0x05, "pipeline: mouse dx 5");
-        CHECK_EQ_U8(g_adapter_stream.bytes[2], 0x00, "pipeline: mouse dy 0");
+    CHECK(g_adapter_mouse_stream.count == 3, "pipeline: 3-byte mouse packet");
+    if (g_adapter_mouse_stream.count == 3) {
+        CHECK_EQ_U8(g_adapter_mouse_stream.bytes[0], 0x00, "pipeline: mouse buttons 0");
+        CHECK_EQ_U8(g_adapter_mouse_stream.bytes[1], 0x05, "pipeline: mouse dx 5");
+        CHECK_EQ_U8(g_adapter_mouse_stream.bytes[2], 0x00, "pipeline: mouse dy 0");
     }
+    CHECK(g_adapter_kbd_stream.count == 0, "pipeline: no kbd bytes for a mouse move");
 
     /* Unused loop var guard. */
     (void)i;

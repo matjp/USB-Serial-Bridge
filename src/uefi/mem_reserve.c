@@ -108,29 +108,39 @@ allocate_reserved_pages_high(UINTN pages, EFI_PHYSICAL_ADDRESS *out)
 }
 
 EFI_STATUS
-uefi_reserve_memory(MAILBOX **out_mailbox)
+uefi_reserve_memory(MAILBOX **out_kbd_mailbox, MAILBOX **out_mouse_mailbox)
 {
     EFI_STATUS status;
-    EFI_PHYSICAL_ADDRESS mailbox_addr = 0;
+    EFI_PHYSICAL_ADDRESS kbd_mailbox_addr = 0;
+    EFI_PHYSICAL_ADDRESS mouse_mailbox_addr = 0;
     EFI_PHYSICAL_ADDRESS bridge_addr = 0;
     EFI_PHYSICAL_ADDRESS topo_addr = 0;
-    MAILBOX *mb;
+    MAILBOX *kbd_mb;
+    MAILBOX *mouse_mb;
     USB_TOPOLOGY *topo;
 
-    *out_mailbox = NULL;
+    *out_kbd_mailbox   = NULL;
+    *out_mouse_mailbox = NULL;
 
-    /* 1. Allocate a page for the MAILBOX (EFI_RESERVED_MEMORY_TYPE), placed
-     *    at the highest address so an E820-collecting OS never allocates
-     *    over it. */
-    status = allocate_reserved_pages_high(1, &mailbox_addr);
+    /* 1. Allocate a page for each MAILBOX (keyboard + mouse, on separate
+     *    rings; EFI_RESERVED_MEMORY_TYPE), placed at the highest address so
+     *    an E820-collecting OS never allocates over them. */
+    status = allocate_reserved_pages_high(1, &kbd_mailbox_addr);
     if (EFI_ERROR(status))
         return status;
-    mb = (MAILBOX *)(UINTN)mailbox_addr;
+    kbd_mb = (MAILBOX *)(UINTN)kbd_mailbox_addr;
 
-    /* Initialize and publish the mailbox. (main.c also calls these after
+    status = allocate_reserved_pages_high(1, &mouse_mailbox_addr);
+    if (EFI_ERROR(status))
+        return status;
+    mouse_mb = (MAILBOX *)(UINTN)mouse_mailbox_addr;
+
+    /* Initialize and publish both mailboxes. (main.c also calls these after
      * this function; both are idempotent.) */
-    mailbox_init(mb);
-    mailbox_publish(mb);
+    mailbox_init(kbd_mb);
+    mailbox_init(mouse_mb);
+    mailbox_publish_kbd(kbd_mb);
+    mailbox_publish_mouse(mouse_mb);
 
     /* 2. Allocate + reserve the bridge code region (also high-placed). */
     status = allocate_reserved_pages_high(BRIDGE_REGION_PAGES, &bridge_addr);
@@ -148,8 +158,9 @@ uefi_reserve_memory(MAILBOX **out_mailbox)
     *topo = g_usb_topology;
     usb_topology_publish(topo);
 
-    /* 4. Return the mailbox pointer. */
-    *out_mailbox = mb;
+    /* 4. Return the mailbox pointers. */
+    *out_kbd_mailbox   = kbd_mb;
+    *out_mouse_mailbox = mouse_mb;
 
     return EFI_SUCCESS;
 }

@@ -215,10 +215,13 @@ OS that implements a reader against this ABI can be loaded. The bridge is the pr
 the per-OS input adapter is the consumer. The ABI is fixed and versioned — the bridge
 and the adapter must agree on it, but neither depends on the other's OS.
 
-A ring buffer in the reserved region, shared between the bridge core (producer) and the
-input adapter on core 0 (consumer). Lock-free single-producer / single-consumer. Because
-the bridge and the OS are on **different cores**, ordering requires `mfence` (x86 is
-cache-coherent via MESI, so the shared memory is coherent).
+A pair of ring buffers in the reserved region, shared between the bridge core
+(producer) and the input adapter on core 0 (consumer). **Keyboard and mouse each have
+their own ring** — mirroring real PS/2's separate ports 0x60/0x64 — so the consumer
+never has to disambiguate a keyboard scancode from a mouse packet. Lock-free
+single-producer / single-consumer per ring. Because the bridge and the OS are on
+**different cores**, ordering requires `mfence` (x86 is cache-coherent via MESI, so the
+shared memory is coherent).
 
 ```c
 #define MAILBOX_RING_SIZE  256
@@ -229,6 +232,10 @@ typedef struct {
     volatile UINT8  ring[MAILBOX_RING_SIZE];
 } MAILBOX;
 ```
+
+Two `MAILBOX` instances are published: one **keyboard ring** and one **mouse ring**.
+The bridge writes keyboard scancodes only to the keyboard ring and mouse packets only
+to the mouse ring; the adapter drains each independently.
 
 **Producer (bridge core):**
 ```c
@@ -242,15 +249,20 @@ head++;
 while (tail != head) {
     byte = ring[tail % MAILBOX_RING_SIZE];
     tail++;
-    /* feed byte to the OS's keyboard/mouse handler */
+    /* feed byte to the OS's keyboard or mouse handler */
 }
 ```
 
 **Byte stream semantics (virtual PS/2) — the "serial keyboard/mouse interface":**
-- Keyboard: PS/2 **Set 1** scancodes, make and break (`0xE0`-prefixed extended codes
-  included). The OS reuses its existing Set 1 decoder.
-- Mouse: 3-byte packets `[buttons, dx, dy]` (two's-complement deltas), matching the
-  standard PS/2 mouse packet the OS already parses.
+- **Keyboard ring:** PS/2 **Set 1** scancodes, make and break (`0xE0`-prefixed extended
+  codes included). The OS reuses its existing Set 1 decoder.
+- **Mouse ring:** 3-byte packets `[buttons, dx, dy]` (two's-complement deltas), matching
+  the standard PS/2 mouse packet the OS already parses.
+
+Because the two device classes never share a ring, there is **no ambiguity**: a byte on
+the keyboard ring is always a scancode, and a byte on the mouse ring is always part of a
+mouse packet. (This removes the earlier single-ring design's collision, where keyboard
+scancodes 0x01–0x07 — Esc and digits 1–6 — could be misread as mouse button bytes.)
 
 **Ordering (cross-core):** The bridge (core N) and the input adapter (core 0) are on
 different cores. x86 is cache-coherent (MESI), so the shared mailbox is coherent. The
@@ -260,12 +272,12 @@ provide the required ordering. No interrupts, no locks.
 **ABI stability rules (what makes it OS-independent):**
 1. The mailbox layout, ring size, and byte-stream format are **fixed** and documented
    here. They do not change per OS.
-2. The bridge never assumes anything about the OS — it only writes bytes to the ring.
+2. The bridge never assumes anything about the OS — it only writes bytes to the rings.
 3. The adapter never assumes anything about the bridge — it only reads bytes from the
-   ring and injects them into its OS.
-4. The mailbox base address is published by the boot-time UEFI app (e.g., a fixed
-   physical address or a value passed to the OS at handoff). Each OS adapter reads this
-   once at startup.
+   rings and injects them into its OS.
+4. The mailbox base addresses are published by the boot-time UEFI app (e.g., fixed
+   physical addresses or values passed to the OS at handoff). Each OS adapter reads
+   these once at startup.
 
 ---
 

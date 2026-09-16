@@ -211,14 +211,17 @@ void bridge_translate_ps2(void);
    - Use `PS2_EXT_PREFIX` (0xE0) from `include/ps2.h` for extended keys (arrows, etc.).
 2. **Mouse:** assemble a 3-byte packet `[buttons, dx, dy]` (`PS2_MOUSE_PKT`) from the
    `HID_MOUSE_EVENT`.
-3. **Emit the byte stream** into a file-local output buffer for B4:
+3. **Emit the byte streams** into file-local output buffers for B4. Keyboard and
+   mouse are kept on **separate streams** (mirroring real PS/2's separate ports
+   0x60/0x64), so O2 never has to disambiguate them:
    ```c
    #define PS2_STREAM_MAX 32
    typedef struct {
        UINT8  bytes[PS2_STREAM_MAX];
        UINTN  count;
    } PS2_STREAM;
-   extern PS2_STREAM g_ps2_stream;
+   extern PS2_STREAM g_ps2_kbd_stream;    /* keyboard scancodes only */
+   extern PS2_STREAM g_ps2_mouse_stream;  /* mouse 3-byte packets only */
    ```
 
 **Reference table (partial — Firmware Coder fills the full Set 1 table):**
@@ -247,14 +250,15 @@ void bridge_translate_ps2(void);
 
 **Public interface (already in `src/bridge/bridge.h`):**
 ```c
-void bridge_write_mailbox(MAILBOX *mb);
+void bridge_write_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
 ```
 
 **Required implementation steps:**
-1. For each byte in `g_ps2_stream`, call `mailbox_write(mb, byte)` (from
+1. For each byte in `g_ps2_kbd_stream`, call `mailbox_write(kbd_mb, byte)`; for each
+   byte in `g_ps2_mouse_stream`, call `mailbox_write(mouse_mb, byte)` (from
    `include/mailbox.h`). This already does the `mfence` + `head++` ordering.
-2. Reset `g_ps2_stream.count = 0` after writing.
-3. **Overflow policy:** if the mailbox is full (producer would lap the consumer), the
+2. Reset `g_ps2_kbd_stream.count = 0` and `g_ps2_mouse_stream.count = 0` after writing.
+3. **Overflow policy:** if a mailbox is full (producer would lap the consumer), the
    bridge must not corrupt the ring. Because the consumer drains continuously, the
    simplest safe policy is to **drop the oldest pending bytes** (advance `head` past
    them) rather than block. Document the chosen policy in a comment. (The consumer on
@@ -270,16 +274,19 @@ void bridge_entry(void);
 ```
 
 **Required implementation steps:**
-1. On entry (after SIPI bring-up), locate the mailbox via `mailbox_lookup()`.
+1. On entry (after SIPI bring-up), locate the two mailboxes via `mailbox_lookup_kbd()`
+   and `mailbox_lookup_mouse()`.
 2. Run the poll loop:
    ```c
    void bridge_entry(void) {
-       MAILBOX *mb = mailbox_lookup();
+       MAILBOX *kbd_mb   = mailbox_lookup_kbd();
+       MAILBOX *mouse_mb = mailbox_lookup_mouse();
        for (;;) {
            bridge_poll_usb();          /* B1 */
            bridge_parse_hid();         /* B2 */
            bridge_translate_ps2();     /* B3 */
-           if (mb) bridge_write_mailbox(mb); /* B4 */
+           if (kbd_mb && mouse_mb)
+               bridge_write_mailbox(kbd_mb, mouse_mb); /* B4 */
            /* TDM: yield the core back to the OS background task (Seth) until
               the next bridge time slot. Implemented by the timer ISR that
               switches between bridge context and OS task context. */
@@ -306,18 +313,15 @@ void bridge_entry(void);
 
 **Public interface (already in `src/adapter/adapter.h`):**
 ```c
-void adapter_drain_mailbox(MAILBOX *mb);
+void adapter_drain_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
 ```
 
 **Required implementation steps:**
-1. Loop `mailbox_read(mb, &byte)` until it returns 0 (ring empty).
-2. Reassemble the virtual PS/2 byte stream:
-   - **Keyboard:** accumulate bytes; a byte with `PS2_BREAK_BIT` (0x80) set is a break;
-     a preceding `PS2_EXT_PREFIX` (0xE0) marks an extended key. Pass the raw scancode
-     bytes to O2.
-   - **Mouse:** accumulate 3-byte packets `[buttons, dx, dy]` (`PS2_MOUSE_PKT_SIZE`).
-     Pass each complete packet to O2.
-3. **O1 is OS-independent** — it only produces the byte stream. It does not know the OS.
+1. Loop `mailbox_read(kbd_mb, &byte)` until it returns 0 (ring empty); accumulate the
+   keyboard scancode bytes into the keyboard stream.
+2. Loop `mailbox_read(mouse_mb, &byte)` until it returns 0; accumulate the mouse
+   3-byte packets `[buttons, dx, dy]` (`PS2_MOUSE_PKT_SIZE`) into the mouse stream.
+3. **O1 is OS-independent** — it only produces the byte streams. It does not know the OS.
 
 **Internal output (consumed by O2):**
 ```c
@@ -326,7 +330,8 @@ typedef struct {
     UINT8  bytes[MAILBOX_RING_SIZE];
     UINTN  count;
 } ADAPTER_STREAM;
-extern ADAPTER_STREAM g_adapter_stream;
+extern ADAPTER_STREAM g_adapter_kbd_stream;    /* keyboard scancodes only */
+extern ADAPTER_STREAM g_adapter_mouse_stream;  /* mouse 3-byte packets only */
 ```
 
 ### 3.2 O2 — Input injection (`src/adapter/input_inject.c`)
@@ -346,6 +351,10 @@ void adapter_inject_input(void);
 2. Because the OS is identity-mapped and its input structures live at known addresses,
    the adapter (loaded code) locates and feeds them directly. **No OS source change.**
 3. This is the **only OS-specific module.** For a different OS, only O2 changes.
+4. **No disambiguation needed:** keyboard scancodes and mouse packets arrive on
+   **separate streams** (`g_adapter_kbd_stream` / `g_adapter_mouse_stream`), so O2
+   parses each independently. There is no heuristic that could misroute a keyboard
+   scancode (e.g. Esc = 0x01, digits 1-6 = 0x02-0x07) as a mouse packet.
 
 > **O2 is a stub for the reference OS.** The Firmware Coder implements the TempleOS
 > hook. A second-OS O2 is a separate portability-demo task (see §6).
@@ -419,20 +428,21 @@ EFI_STATUS uefi_bringup_highest_core(void);
 
 **Public interface (already in `src/uefi/uefi.h`):**
 ```c
-EFI_STATUS uefi_reserve_memory(MAILBOX **out_mailbox);
+EFI_STATUS uefi_reserve_memory(MAILBOX **out_kbd_mailbox,
+                               MAILBOX **out_mouse_mailbox);
 ```
 
 **Required implementation steps:**
-1. Allocate a page for the `MAILBOX` via `AllocatePages` with
-   `EfiReservedMemoryType`. Initialize it (`mailbox_init`) and publish it
-   (`mailbox_publish`).
+1. Allocate a page for each `MAILBOX` (keyboard + mouse, on separate rings) via
+   `AllocatePages` with `EfiReservedMemoryType`. Initialize each (`mailbox_init`) and
+   publish them (`mailbox_publish_kbd` / `mailbox_publish_mouse`).
 2. Allocate + reserve the bridge code region and the `USB_TOPOLOGY` region with
    `EfiReservedMemoryType`.
 3. **Critical (TempleOS / E820-collecting OS):** `EfiReservedMemoryType` alone is NOT
    sufficient. The region must also be carved out of the E820 map the OS collects, or
    placed **above** the OS's physical memory space so it never allocates over it.
    (See architecture.md §9 risk row.)
-4. Return the mailbox pointer via `*out_mailbox`.
+4. Return the mailbox pointers via `*out_kbd_mailbox` and `*out_mouse_mailbox`.
 
 ---
 

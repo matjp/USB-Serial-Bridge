@@ -1,8 +1,8 @@
-# Host unit tests for the Layer 0 bridge modules (B2, B3, B4, O1).
+# Host unit tests for the bridge + input adapter modules.
 #
-# These modules are pure C and hardware-independent, so they can be compiled
-# and run on the host (no UEFI, no hardware, no OS). See
-# docs/architecture.md section 9, Layer 0.
+# Layer 0 (test_layer0): B2, B3, B4, O1 - pure C, hardware-independent.
+# Layer 2 (test_layer2): O2 input injection against a stub input queue.
+# See docs/architecture.md section 9, Layers 0 and 2.
 #
 # The modules are written against GNU-EFI types (<efi.h>). For the host test
 # build we shadow <efi.h> with tests/efi/efi.h (a type shim) by putting
@@ -14,7 +14,7 @@
 # (e.g. `make -C tests run`), so all paths are relative to tests/.
 #
 # Usage:
-#   make            - build the test binary (build/test_layer0)
+#   make            - build the test binaries (build/test_layer0, build/test_layer2)
 #   make run        - build and run the tests
 #   make clean      - remove build artifacts
 
@@ -24,7 +24,7 @@ CFLAGS  := -Wall -Wextra -O2 -g -std=c99
 # Include order matters: tests/efi shadows <efi.h> with the shim.
 INCLUDES := -I. -Iefi -I../include -I../src/bridge -I../src/adapter
 
-# Layer 0 modules under test (B2, B3, B4, O1) + shared mailbox helpers.
+# --- Layer 0 modules under test (B2, B3, B4, O1) + shared mailbox helpers.
 #
 # b1_stub.c is a host-only stub that defines the raw HID report globals
 # (g_raw_kbd, g_raw_mouse, g_kbd_valid, g_mouse_valid). In the firmware build
@@ -44,11 +44,26 @@ OBJS := $(OBJS:b1_stub.c=build/b1_stub.o)
 
 TARGET := build/test_layer0
 
+# --- Layer 2 modules under test (O2 input injection) + the O1 reader that
+# produces the drained stream + shared mailbox helpers. O2's OS-specific
+# hook is overridden in test_layer2.c with a stub input queue.
+SRCS_L2 := \
+	../src/adapter/mailbox_reader.c \
+	../src/adapter/input_inject.c \
+	../src/common/mailbox.c
+
+OBJS_L2 := $(SRCS_L2:../src/%.c=build/%.o)
+
+TARGET_L2 := build/test_layer2
+
 .PHONY: all run clean
 
-all: $(TARGET)
+all: $(TARGET) $(TARGET_L2)
 
 $(TARGET): $(OBJS) build/test_layer0.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET_L2): $(OBJS_L2) build/test_layer2.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 build/%.o: ../src/%.c
@@ -63,8 +78,13 @@ build/test_layer0.o: test_layer0.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+build/test_layer2.o: test_layer2.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 run: all
 	./$(TARGET)
+	./$(TARGET_L2)
 
 clean:
 	rm -rf build

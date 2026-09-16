@@ -18,7 +18,7 @@
 #include <efi.h>
 
 #define MAILBOX_RING_SIZE  256
-#define MAILBOX_ABI_VERSION 1
+#define MAILBOX_ABI_VERSION 2
 
 typedef struct {
     volatile UINT32 head;   /* producer (bridge core) write index */
@@ -26,11 +26,17 @@ typedef struct {
     volatile UINT8  ring[MAILBOX_RING_SIZE];
 } MAILBOX;
 
-/* Byte-stream semantics (virtual PS/2):
- *   - Keyboard: PS/2 Set 1 scancodes, make and break (0xE0-prefixed extended
- *     codes included). The OS reuses its existing Set 1 decoder.
- *   - Mouse: 3-byte packets [buttons, dx, dy] (two's-complement deltas),
- *     matching the standard PS/2 mouse packet the OS already parses.
+/* Byte-stream semantics (virtual PS/2), delivered on TWO independent rings:
+ *   - Keyboard ring: PS/2 Set 1 scancodes, make and break (0xE0-prefixed
+ *     extended codes included). The OS reuses its existing Set 1 decoder.
+ *   - Mouse ring: 3-byte packets [buttons, dx, dy] (two's-complement
+ *     deltas), matching the standard PS/2 mouse packet the OS already
+ *     parses.
+ *
+ * The keyboard and mouse are carried on SEPARATE rings (mirroring real PS/2
+ * hardware, where they are on separate ports 0x60/0x64). This removes any
+ * need to disambiguate the two byte streams - a keyboard scancode can never
+ * be confused with a mouse packet, and vice versa.
  */
 
 /* Producer (bridge core): write one byte, then mfence, then head++. */
@@ -56,10 +62,16 @@ mailbox_read(MAILBOX *mb, UINT8 *out)
 /* Initialize a mailbox (head = tail = 0). */
 void mailbox_init(MAILBOX *mb);
 
-/* Publish the mailbox base address at the fixed pointer location. */
-void mailbox_publish(MAILBOX *mb);
+/* Publish the keyboard mailbox base address at the fixed pointer location. */
+void mailbox_publish_kbd(MAILBOX *mb);
 
-/* Read the published mailbox base address (returns NULL if not published). */
-MAILBOX *mailbox_lookup(void);
+/* Publish the mouse mailbox base address at the fixed pointer location. */
+void mailbox_publish_mouse(MAILBOX *mb);
+
+/* Read the published keyboard mailbox base address (NULL if not published). */
+MAILBOX *mailbox_lookup_kbd(void);
+
+/* Read the published mouse mailbox base address (NULL if not published). */
+MAILBOX *mailbox_lookup_mouse(void);
 
 #endif /* MAILBOX_H */

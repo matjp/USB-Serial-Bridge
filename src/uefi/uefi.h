@@ -18,7 +18,8 @@ EFI_STATUS uefi_verify_xhci(void);
 EFI_STATUS uefi_discover_usb(void);
 
 /* U3: Allocate + reserve the bridge and mailbox regions. */
-EFI_STATUS uefi_reserve_memory(MAILBOX **out_mailbox);
+EFI_STATUS uefi_reserve_memory(MAILBOX **out_kbd_mailbox,
+                               MAILBOX **out_mouse_mailbox);
 
 /* U2: Bring up the highest core via SIPI, loading the bridge code. */
 EFI_STATUS uefi_bringup_highest_core(void);

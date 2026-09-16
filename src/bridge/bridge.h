@@ -26,8 +26,8 @@ void bridge_parse_hid(void);
 /* B3: Translate HID events into PS/2 Set 1 + mouse packets. */
 void bridge_translate_ps2(void);
 
-/* B4: Write the PS/2 byte stream to the mailbox. */
-void bridge_write_mailbox(MAILBOX *mb);
+/* B4: Write the PS/2 byte streams to the two mailboxes (kbd + mouse). */
+void bridge_write_mailbox(MAILBOX *kbd_mb, MAILBOX *mouse_mb);
 
 /* B5: Bridge core entry point (called after SIPI bring-up). */
 void bridge_entry(void);

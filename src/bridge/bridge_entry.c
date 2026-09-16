@@ -23,7 +23,8 @@
 void
 bridge_entry(void)
 {
-    MAILBOX *mb = mailbox_lookup();
+    MAILBOX *kbd_mb   = mailbox_lookup_kbd();
+    MAILBOX *mouse_mb = mailbox_lookup_mouse();
 
     for (;;) {
         /* If the USB controller is unusable (non-XHCI>=1.0 or a fatal
@@ -40,9 +41,8 @@ bridge_entry(void)
         bridge_parse_hid();
         bridge_translate_ps2();
 
-        /* Write the byte stream to the mailbox (B4). */
-        if (mb)
-            bridge_write_mailbox(mb);
+        /* Write the byte streams to the two mailboxes (B4). */
+        bridge_write_mailbox(kbd_mb, mouse_mb);
 
         /* TDM handshake: yield the core back to the OS background task
          * (Seth) until the next bridge time slice. The timer ISR on this
