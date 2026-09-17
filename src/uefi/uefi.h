@@ -10,25 +10,6 @@
 
 #include <efi.h>
 
-/*
- * Screen output gating.
- *
- * The release build is SILENT: it performs the bridge setup and hands off to
- * the OS with no console output at all. All Print() calls in the UEFI setup
- * path (main.c, l1_harness.c, usb_discovery.c) are compiled to no-ops unless
- * BRIDGE_DEBUG is defined (the debug build).
- *
- * This header is included AFTER <efilib.h> in every file that prints, so the
- * Print() function declaration is already visible and this macro cleanly
- * overrides all subsequent call sites. The debug build is unchanged.
- */
-#ifdef BRIDGE_DEBUG
-/* Debug build: Print() works normally (declared in <efilib.h>). */
-#else
-/* Release build: Print() is a no-op - no screen output. */
-#define Print(...) ((void)0)
-#endif
-
 /* U1: Verify the host controller is XHCI >= 1.0 (C6). */
 EFI_STATUS uefi_verify_xhci(void);
 
