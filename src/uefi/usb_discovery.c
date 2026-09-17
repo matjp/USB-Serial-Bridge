@@ -298,6 +298,8 @@ uefi_discover_usb(void)
     status = uefi_call_wrapper(
         BS->LocateHandleBuffer, 5,
         ByProtocol, &EFI_USB_IO_PROTOCOL_GUID, NULL, &num_handles, &handles);
+    Print(L"BRIDGE-DBG: discover: LocateHandleBuffer(UsbIo) -> %r, %d handles\n",
+          status, num_handles);
     if (EFI_ERROR(status) || num_handles == 0) {
         if (handles)
             FreePool(handles);
@@ -308,13 +310,24 @@ uefi_discover_usb(void)
         status = uefi_call_wrapper(
             BS->HandleProtocol, 3,
             handles[i], &EFI_USB_IO_PROTOCOL_GUID, (VOID **)&usbio);
-        if (EFI_ERROR(status) || usbio == NULL)
+        if (EFI_ERROR(status) || usbio == NULL) {
+            Print(L"BRIDGE-DBG: discover: handle %d HandleProtocol failed (%r)\n",
+                  i, status);
             continue;
+        }
 
         /* Read the device descriptor to get the device address. */
         status = uefi_call_wrapper(usbio->GetDeviceDescriptor, 2, usbio, &dev_desc);
-        if (EFI_ERROR(status))
+        if (EFI_ERROR(status)) {
+            Print(L"BRIDGE-DBG: discover: handle %d GetDeviceDescriptor failed (%r)\n",
+                  i, status);
             continue;
+        }
+        Print(L"BRIDGE-DBG: discover: handle %d VID=%04X PID=%04X class=%02X "
+              L"sub=%02X proto=%02X maxpkt0=%d\n",
+              i, dev_desc.IdVendor, dev_desc.IdProduct, dev_desc.DeviceClass,
+              dev_desc.DeviceSubClass, dev_desc.DeviceProtocol,
+              dev_desc.MaxPacketSize0);
 
         /* Walk interfaces to find a boot-protocol HID interface. */
         for (iface_idx = 0; iface_idx < 16; iface_idx++) {
@@ -322,6 +335,12 @@ uefi_discover_usb(void)
                 usbio->GetInterfaceDescriptor, 3, usbio, iface_idx, &iface_desc);
             if (EFI_ERROR(status))
                 break;   /* no more interfaces */
+
+            Print(L"BRIDGE-DBG: discover:   iface %d class=%02X sub=%02X "
+                  L"proto=%02X eps=%d\n",
+                  iface_idx, iface_desc.InterfaceClass,
+                  iface_desc.InterfaceSubClass, iface_desc.InterfaceProtocol,
+                  iface_desc.NumEndpoints);
 
             /* Boot-protocol HID: class 3, subclass 1 (boot), protocol 1
              * (keyboard) or 2 (mouse). */
@@ -363,6 +382,10 @@ uefi_discover_usb(void)
                     g_usb_topology.kbd.max_packet  = ep_desc.MaxPacketSize;
                     g_usb_topology.kbd.speed       = speed;
                     found_kbd = TRUE;
+                    Print(L"BRIDGE-DBG: discover:   KBD ep=%02X int=%d "
+                          L"maxpkt=%d speed=%d\n",
+                          ep_desc.EndpointAddress, ep_desc.Interval,
+                          ep_desc.MaxPacketSize, speed);
                 } else if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_MOUSE &&
                            !found_mouse) {
                     g_usb_topology.mouse.endpoint    = ep_desc.EndpointAddress;
@@ -370,6 +393,10 @@ uefi_discover_usb(void)
                     g_usb_topology.mouse.max_packet  = ep_desc.MaxPacketSize;
                     g_usb_topology.mouse.speed       = speed;
                     found_mouse = TRUE;
+                    Print(L"BRIDGE-DBG: discover:   MOUSE ep=%02X int=%d "
+                          L"maxpkt=%d speed=%d\n",
+                          ep_desc.EndpointAddress, ep_desc.Interval,
+                          ep_desc.MaxPacketSize, speed);
                 }
                 break;   /* one interrupt IN endpoint per interface is enough */
             }
@@ -381,6 +408,9 @@ uefi_discover_usb(void)
 
     if (handles)
         FreePool(handles);
+
+    Print(L"BRIDGE-DBG: discover: done, found_kbd=%d found_mouse=%d\n",
+          found_kbd, found_mouse);
 
     if (!found_kbd || !found_mouse)
         return EFI_NOT_FOUND;
