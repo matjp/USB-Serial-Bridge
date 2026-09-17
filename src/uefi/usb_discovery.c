@@ -236,10 +236,13 @@ record_root_hub_ports(void)
 
     op_base = g_xhci_mmio_base + g_xhci_cap_len;
 
-    /* Convert the topology speed field (0=full, 1=low) to the PORTSC
-     * SPEED encoding (1=low, 2=full) so we can match by speed. */
-    kbd_speed   = (g_usb_topology.kbd.speed == 1) ? 1 : 2;
-    mouse_speed = (g_usb_topology.mouse.speed == 1) ? 1 : 2;
+    /* Convert the topology speed field (0=full, 1=low, 2=high) to the
+     * PORTSC SPEED encoding (1=low, 2=full, 3=high) so we can match by
+     * speed. */
+    kbd_speed   = (g_usb_topology.kbd.speed == 1) ? 1 :
+                  (g_usb_topology.kbd.speed == 2) ? 3 : 2;
+    mouse_speed = (g_usb_topology.mouse.speed == 1) ? 1 :
+                  (g_usb_topology.mouse.speed == 2) ? 3 : 2;
 
     for (port = 1; port <= max_ports; port++) {
         portsc = xhci_port_read32(op_base, port);
@@ -286,7 +289,6 @@ uefi_discover_usb(void)
     BOOLEAN found_kbd = FALSE;
     BOOLEAN found_mouse = FALSE;
     UINT8 speed = 0;
-    UINT8 next_addr = 1;   /* UEFI USB stack assigns addresses 1,2,... */
 
     /* Record the XHCI MMIO base + CAPLENGTH from uefi_verify_xhci(). */
     g_usb_topology.xhci_mmio_base = g_xhci_mmio_base;
@@ -343,13 +345,19 @@ uefi_discover_usb(void)
                     continue;
 
                 /* Determine speed from the device descriptor's
-                 * MaxPacketSize0 (8=low, 64=full) - a reasonable proxy for
-                 * low/full speed HID devices. */
-                speed = (dev_desc.MaxPacketSize0 <= 8) ? 1 : 0;
+                 * MaxPacketSize0 (USB 2.0 spec, table 9-8): low-speed = 8,
+                 * full-speed = 8/16/32/64, high-speed = 64. For the fixed
+                 * low/full-speed HID topology, 8 => low, 64 => high, and
+                 * anything else (16/32) => full. */
+                if (dev_desc.MaxPacketSize0 == 8)
+                    speed = 1;   /* low speed */
+                else if (dev_desc.MaxPacketSize0 == 64)
+                    speed = 2;   /* high speed */
+                else
+                    speed = 0;   /* full speed */
 
                 if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_KEYBOARD &&
                     !found_kbd) {
-                    g_usb_topology.kbd.device_addr = next_addr++;
                     g_usb_topology.kbd.endpoint    = ep_desc.EndpointAddress;
                     g_usb_topology.kbd.interval    = ep_desc.Interval;
                     g_usb_topology.kbd.max_packet  = ep_desc.MaxPacketSize;
@@ -357,7 +365,6 @@ uefi_discover_usb(void)
                     found_kbd = TRUE;
                 } else if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_MOUSE &&
                            !found_mouse) {
-                    g_usb_topology.mouse.device_addr = next_addr++;
                     g_usb_topology.mouse.endpoint    = ep_desc.EndpointAddress;
                     g_usb_topology.mouse.interval    = ep_desc.Interval;
                     g_usb_topology.mouse.max_packet  = ep_desc.MaxPacketSize;

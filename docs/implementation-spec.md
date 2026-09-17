@@ -60,7 +60,6 @@ can read it after `ExitBootServices`.
 
 /* One pre-discovered interrupt IN endpoint. */
 typedef struct {
-    UINT8  device_addr;   /* USB device address (1..127) */
     UINT8  endpoint;      /* endpoint number, low 4 bits = addr, bit7 = IN */
     UINT8  interval;      /* bInterval (in frames/microframes) */
     UINT16 max_packet;    /* wMaxPacketSize */
@@ -71,7 +70,7 @@ typedef struct {
 typedef struct {
     USB_ENDPOINT kbd;            /* keyboard interrupt IN endpoint */
     USB_ENDPOINT mouse;          /* mouse interrupt IN endpoint */
-    UINT32       xhci_mmio_base; /* XHCI MMIO base (BAR0), for B1 direct drive */
+    UINT64       xhci_mmio_base; /* XHCI MMIO base (BAR0, 64-bit), for B1 */
     UINT32       xhci_cap_len;   /* CAPLENGTH, for B1 register offsets */
 } USB_TOPOLOGY;
 

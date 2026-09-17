@@ -318,11 +318,14 @@ xhci_status_record(const XHCI *xhci, const USB_TOPOLOGY *topo)
     g_xhci_status.page_size       = xhci->page_size;
     g_xhci_status.xhci_mmio_base  = topo->xhci_mmio_base;
     g_xhci_status.xhci_cap_len    = topo->xhci_cap_len;
-    g_xhci_status.kbd             = (UINT32)topo->kbd.device_addr
+    /* B1 assigns its own device addresses during bring-up (kbd = device 1,
+     * mouse = device 2, see xhci_setup_devices). The UEFI-assigned address
+     * is not exposed by EFI_USB_IO_PROTOCOL and is not used here. */
+    g_xhci_status.kbd             = (UINT32)1
                                   | ((UINT32)topo->kbd.endpoint << 8)
                                   | ((UINT32)topo->kbd.interval << 16)
                                   | ((UINT32)topo->kbd.speed << 24);
-    g_xhci_status.mouse           = (UINT32)topo->mouse.device_addr
+    g_xhci_status.mouse           = (UINT32)2
                                   | ((UINT32)topo->mouse.endpoint << 8)
                                   | ((UINT32)topo->mouse.interval << 16)
                                   | ((UINT32)topo->mouse.speed << 24);

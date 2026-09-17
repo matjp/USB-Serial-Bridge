@@ -23,7 +23,6 @@
 
 /* One pre-discovered interrupt IN endpoint. */
 typedef struct {
-    UINT8  device_addr;   /* USB device address (1..127) */
     UINT8  endpoint;      /* endpoint number, low 4 bits = addr, bit7 = IN */
     UINT8  interval;      /* bInterval (in frames/microframes) */
     UINT16 max_packet;    /* wMaxPacketSize */
