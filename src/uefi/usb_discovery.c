@@ -28,6 +28,14 @@ USB_TOPOLOGY g_usb_topology;
 static UINT64 g_xhci_mmio_base;
 static UINT32 g_xhci_cap_len;
 
+/* The EFI_PCI_IO_PROTOCOL handle for the xHCI controller, retained so the
+ * XHCI capability/operational registers can be read via the protocol's
+ * Mem.Read accessor (BAR0) instead of a direct MMIO dereference. Direct
+ * MMIO dereference of a PCI BAR can hang on real hardware if the region is
+ * not mapped in the UEFI app's page tables; Mem.Read performs the access
+ * through the firmware and is safe. */
+static EFI_PCI_IO_PROTOCOL *g_xhci_pci = NULL;
+
 /* ------------------------------------------------------------------ */
 /* PCI helpers                                                         */
 /* ------------------------------------------------------------------ */
@@ -45,12 +53,22 @@ pci_read_config32(EFI_PCI_IO_PROTOCOL *pci, UINT32 offset, UINT32 *value)
 /* ------------------------------------------------------------------ */
 
 /* Read a 32-bit XHCI capability register at the given offset from the
- * MMIO base. */
+ * MMIO base, via the EFI_PCI_IO_PROTOCOL Mem.Read accessor (BAR0). This
+ * avoids a direct MMIO dereference, which can hang on real hardware if the
+ * BAR region is not mapped in the UEFI app's page tables. Returns 0 if the
+ * PCI handle is unavailable. */
 static UINT32
 xhci_cap_read32(UINT64 mmio_base, UINT32 offset)
 {
-    volatile UINT32 *reg = (volatile UINT32 *)(UINTN)(mmio_base + offset);
-    return *reg;
+    UINT32 value = 0;
+    if (g_xhci_pci != NULL) {
+        g_xhci_pci->Mem.Read(g_xhci_pci, EfiPciIoWidthUint32, 0, offset, 1,
+                             &value);
+    } else {
+        volatile UINT32 *reg = (volatile UINT32 *)(UINTN)(mmio_base + offset);
+        value = *reg;
+    }
+    return value;
 }
 
 /* ------------------------------------------------------------------ */
@@ -64,13 +82,24 @@ xhci_cap_read32(UINT64 mmio_base, UINT32 offset)
 #define XHCI_PORTSC_SPEED  0x3C00  /* bits 10:13: device speed */
 
 /* Read a 32-bit XHCI PORTSC register for the given 1-based root-hub port.
- * op_base is the operational register base (mmio_base + CAPLENGTH). */
+ * op_base is the operational register base (mmio_base + CAPLENGTH). Read
+ * via the EFI_PCI_IO_PROTOCOL Mem.Read accessor (BAR0) to avoid a direct
+ * MMIO dereference that can hang on real hardware. */
 static UINT32
 xhci_port_read32(UINT64 op_base, UINT32 port)
 {
-    volatile UINT32 *reg = (volatile UINT32 *)(UINTN)
-        (op_base + XHCI_PORTSC_BASE + (port - 1) * XHCI_PORTSC_STRIDE);
-    return *reg;
+    UINT32 value = 0;
+    UINT64 offset = (op_base - g_xhci_mmio_base) + XHCI_PORTSC_BASE +
+                    (port - 1) * XHCI_PORTSC_STRIDE;
+    if (g_xhci_pci != NULL) {
+        g_xhci_pci->Mem.Read(g_xhci_pci, EfiPciIoWidthUint32, 0, offset, 1,
+                             &value);
+    } else {
+        volatile UINT32 *reg = (volatile UINT32 *)(UINTN)
+            (op_base + XHCI_PORTSC_BASE + (port - 1) * XHCI_PORTSC_STRIDE);
+        value = *reg;
+    }
+    return value;
 }
 
 /* ------------------------------------------------------------------ */
@@ -103,9 +132,12 @@ uefi_verify_xhci(void)
     UINT32 spec_version = 0;
 
     /* --- Preferred path: PCI walk for class code 0x0C0330 (xHCI). --- */
+    Print(L"BRIDGE-DBG: verify: LocateHandleBuffer(PciIo)\n");
     status = uefi_call_wrapper(
         BS->LocateHandleBuffer, 5,
         ByProtocol, &gEfiPciIoProtocolGuid, NULL, &num_handles, &handles);
+    Print(L"BRIDGE-DBG: verify: LocateHandleBuffer(PciIo) -> %r, %d handles\n",
+          status, num_handles);
     if (EFI_ERROR(status) || num_handles == 0) {
         /* No PCI IO protocol handles - fall through to the USB2_HC path. */
         goto alt_path;
@@ -137,6 +169,9 @@ uefi_verify_xhci(void)
              * low 4 bits; the high 32 bits (offset 0x14) hold the upper
              * base. Read both so the MMIO base is correct even when the
              * BAR is allocated above 4 GB. */
+            Print(L"BRIDGE-DBG: verify: found xHCI at PCI handle %d, "
+                  L"class=%08X\n", i, class_code);
+            g_xhci_pci = pci;   /* retain for safe BAR0 MMIO reads */
             status = pci_read_config32(pci, 0x10, &bar0);
             if (EFI_ERROR(status))
                 continue;
@@ -145,16 +180,21 @@ uefi_verify_xhci(void)
                 continue;
 
             g_xhci_mmio_base = ((UINT64)bar0_hi << 32) | (bar0 & 0xFFFFFFF0u);
+            Print(L"BRIDGE-DBG: verify: BAR0=%08X BAR0hi=%08X mmio=%016llX\n",
+                  bar0, bar0_hi, (unsigned long long)g_xhci_mmio_base);
 
             /* CAPLENGTH is the low byte of the first capability register
              * (offset 0x00 of the MMIO space). */
             cap_len = xhci_cap_read32(g_xhci_mmio_base, 0x00) & 0xFF;
             g_xhci_cap_len = cap_len;
+            Print(L"BRIDGE-DBG: verify: CAPLEN=%02X\n", cap_len);
 
             /* The XHCI spec version is HCIVERSION at capability offset
              * 0x00, bits 16:31, in BCD (0x0100 = 1.0). */
             hciversion = xhci_cap_read32(g_xhci_mmio_base, 0x00);
             spec_version = (hciversion >> 16) & 0xFFFF;
+            Print(L"BRIDGE-DBG: verify: HCIVERSION=%04X spec=%04X\n",
+                  hciversion, spec_version);
 
             if (spec_version >= 0x0100) {
                 /* XHCI >= 1.0 (C6). */
@@ -174,11 +214,13 @@ uefi_verify_xhci(void)
 
 alt_path:
     /* --- Alternative path: EFI_USB2_HC_PROTOCOL revision check. --- */
+    Print(L"BRIDGE-DBG: verify: alt path EFI_USB2_HC_PROTOCOL\n");
     {
         EFI_USB2_HC_PROTOCOL *hc = NULL;
         status = uefi_call_wrapper(
             BS->LocateProtocol, 3,
             &EFI_USB2_HC_PROTOCOL_GUID, NULL, (VOID **)&hc);
+        Print(L"BRIDGE-DBG: verify: LocateProtocol(Usb2Hc) -> %r\n", status);
         if (EFI_ERROR(status) || hc == NULL)
             return EFI_UNSUPPORTED;
 
