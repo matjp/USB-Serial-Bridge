@@ -407,7 +407,6 @@ typedef
 EFI_STATUS
 (EFIAPI *EFI_USB_IO_GET_INTERFACE_DESCRIPTOR)(
     IN  EFI_USB_IO_PROTOCOL *This,
-    IN  UINTN InterfaceIndex,
     OUT EFI_USB_INTERFACE_DESCRIPTOR *InterfaceDescriptor
     );
 
@@ -415,8 +414,7 @@ typedef
 EFI_STATUS
 (EFIAPI *EFI_USB_IO_GET_ENDPOINT_DESCRIPTOR)(
     IN  EFI_USB_IO_PROTOCOL *This,
-    IN  UINTN InterfaceIndex,
-    IN  UINTN EndpointIndex,
+    IN  UINT8 EndpointIndex,
     OUT EFI_USB_ENDPOINT_DESCRIPTOR *EndpointDescriptor
     );
 

@@ -285,7 +285,7 @@ uefi_discover_usb(void)
     EFI_USB_DEVICE_DESCRIPTOR dev_desc;
     EFI_USB_INTERFACE_DESCRIPTOR iface_desc;
     EFI_USB_ENDPOINT_DESCRIPTOR ep_desc;
-    UINTN iface_idx, ep_idx;
+    UINTN ep_idx;
     BOOLEAN found_kbd = FALSE;
     BOOLEAN found_mouse = FALSE;
     UINT8 speed = 0;
@@ -329,77 +329,84 @@ uefi_discover_usb(void)
               dev_desc.DeviceSubClass, dev_desc.DeviceProtocol,
               dev_desc.MaxPacketSize0);
 
-        /* Walk interfaces to find a boot-protocol HID interface. */
-        for (iface_idx = 0; iface_idx < 16; iface_idx++) {
+        /* Get the active interface descriptor. NOTE: the real EDK2
+         * EFI_USB_IO_PROTOCOL.GetInterfaceDescriptor takes only (This,
+         * InterfaceDescriptor) - it returns the single active interface,
+         * NOT an indexed walk. A HID kbd/mouse has exactly one interface,
+         * so a single call suffices. */
+        status = uefi_call_wrapper(
+            usbio->GetInterfaceDescriptor, 2, usbio, &iface_desc);
+        if (EFI_ERROR(status)) {
+            Print(L"BRIDGE-DBG: discover:   GetInterfaceDescriptor failed (%r)\n",
+                  status);
+            continue;
+        }
+
+        Print(L"BRIDGE-DBG: discover:   iface class=%02X sub=%02X "
+              L"proto=%02X eps=%d\n",
+              iface_desc.InterfaceClass,
+              iface_desc.InterfaceSubClass, iface_desc.InterfaceProtocol,
+              iface_desc.NumEndpoints);
+
+        /* Boot-protocol HID: class 3, subclass 1 (boot), protocol 1
+         * (keyboard) or 2 (mouse). */
+        if (iface_desc.InterfaceClass != USB_CLASS_HID ||
+            iface_desc.InterfaceSubClass != USB_HID_SUBCLASS_BOOT)
+            continue;
+
+        /* Find the interrupt IN endpoint on this interface. NOTE: the real
+         * EDK2 GetEndpointDescriptor takes only (This, EndpointIndex,
+         * EndpointDescriptor) - no interface index. */
+        for (ep_idx = 0; ep_idx < iface_desc.NumEndpoints; ep_idx++) {
             status = uefi_call_wrapper(
-                usbio->GetInterfaceDescriptor, 3, usbio, iface_idx, &iface_desc);
+                usbio->GetEndpointDescriptor, 3,
+                usbio, (UINT8)ep_idx, &ep_desc);
             if (EFI_ERROR(status))
-                break;   /* no more interfaces */
+                break;
 
-            Print(L"BRIDGE-DBG: discover:   iface %d class=%02X sub=%02X "
-                  L"proto=%02X eps=%d\n",
-                  iface_idx, iface_desc.InterfaceClass,
-                  iface_desc.InterfaceSubClass, iface_desc.InterfaceProtocol,
-                  iface_desc.NumEndpoints);
-
-            /* Boot-protocol HID: class 3, subclass 1 (boot), protocol 1
-             * (keyboard) or 2 (mouse). */
-            if (iface_desc.InterfaceClass != USB_CLASS_HID ||
-                iface_desc.InterfaceSubClass != USB_HID_SUBCLASS_BOOT)
+            /* Interrupt endpoint, IN direction. */
+            if ((ep_desc.Attributes & USB_ENDPOINT_TYPE_MASK) !=
+                    USB_ENDPOINT_TYPE_INTERRUPT)
+                continue;
+            if ((ep_desc.EndpointAddress & USB_ENDPOINT_DIR_IN) == 0)
                 continue;
 
-            /* Find the interrupt IN endpoint on this interface. */
-            for (ep_idx = 0; ep_idx < iface_desc.NumEndpoints; ep_idx++) {
-                status = uefi_call_wrapper(
-                    usbio->GetEndpointDescriptor, 4,
-                    usbio, iface_idx, ep_idx, &ep_desc);
-                if (EFI_ERROR(status))
-                    break;
+            /* Determine speed from the device descriptor's
+             * MaxPacketSize0 (USB 2.0 spec, table 9-8): low-speed = 8,
+             * full-speed = 8/16/32/64, high-speed = 64. For the fixed
+             * low/full-speed HID topology, 8 => low, 64 => high, and
+             * anything else (16/32) => full. */
+            if (dev_desc.MaxPacketSize0 == 8)
+                speed = 1;   /* low speed */
+            else if (dev_desc.MaxPacketSize0 == 64)
+                speed = 2;   /* high speed */
+            else
+                speed = 0;   /* full speed */
 
-                /* Interrupt endpoint, IN direction. */
-                if ((ep_desc.Attributes & USB_ENDPOINT_TYPE_MASK) !=
-                        USB_ENDPOINT_TYPE_INTERRUPT)
-                    continue;
-                if ((ep_desc.EndpointAddress & USB_ENDPOINT_DIR_IN) == 0)
-                    continue;
-
-                /* Determine speed from the device descriptor's
-                 * MaxPacketSize0 (USB 2.0 spec, table 9-8): low-speed = 8,
-                 * full-speed = 8/16/32/64, high-speed = 64. For the fixed
-                 * low/full-speed HID topology, 8 => low, 64 => high, and
-                 * anything else (16/32) => full. */
-                if (dev_desc.MaxPacketSize0 == 8)
-                    speed = 1;   /* low speed */
-                else if (dev_desc.MaxPacketSize0 == 64)
-                    speed = 2;   /* high speed */
-                else
-                    speed = 0;   /* full speed */
-
-                if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_KEYBOARD &&
-                    !found_kbd) {
-                    g_usb_topology.kbd.endpoint    = ep_desc.EndpointAddress;
-                    g_usb_topology.kbd.interval    = ep_desc.Interval;
-                    g_usb_topology.kbd.max_packet  = ep_desc.MaxPacketSize;
-                    g_usb_topology.kbd.speed       = speed;
-                    found_kbd = TRUE;
-                    Print(L"BRIDGE-DBG: discover:   KBD ep=%02X int=%d "
-                          L"maxpkt=%d speed=%d\n",
-                          ep_desc.EndpointAddress, ep_desc.Interval,
-                          ep_desc.MaxPacketSize, speed);
-                } else if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_MOUSE &&
-                           !found_mouse) {
-                    g_usb_topology.mouse.endpoint    = ep_desc.EndpointAddress;
-                    g_usb_topology.mouse.interval    = ep_desc.Interval;
-                    g_usb_topology.mouse.max_packet  = ep_desc.MaxPacketSize;
-                    g_usb_topology.mouse.speed       = speed;
-                    found_mouse = TRUE;
-                    Print(L"BRIDGE-DBG: discover:   MOUSE ep=%02X int=%d "
-                          L"maxpkt=%d speed=%d\n",
-                          ep_desc.EndpointAddress, ep_desc.Interval,
-                          ep_desc.MaxPacketSize, speed);
-                }
-                break;   /* one interrupt IN endpoint per interface is enough */
+            if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_KEYBOARD &&
+                !found_kbd) {
+                g_usb_topology.kbd.endpoint    = ep_desc.EndpointAddress;
+                g_usb_topology.kbd.interval    = ep_desc.Interval;
+                g_usb_topology.kbd.max_packet  = ep_desc.MaxPacketSize;
+                g_usb_topology.kbd.speed       = speed;
+                found_kbd = TRUE;
+                Print(L"BRIDGE-DBG: discover:   KBD ep=%02X int=%d "
+                      L"maxpkt=%d speed=%d\n",
+                      ep_desc.EndpointAddress, ep_desc.Interval,
+                      ep_desc.MaxPacketSize, speed);
+            } else if (iface_desc.InterfaceProtocol == USB_HID_PROTOCOL_MOUSE &&
+                       !found_mouse) {
+                g_usb_topology.mouse.endpoint    = ep_desc.EndpointAddress;
+                g_usb_topology.mouse.interval    = ep_desc.Interval;
+                g_usb_topology.mouse.max_packet  = ep_desc.MaxPacketSize;
+                g_usb_topology.mouse.speed       = speed;
+                found_mouse = TRUE;
+                Print(L"BRIDGE-DBG: discover:   MOUSE ep=%02X int=%d "
+                      L"maxpkt=%d speed=%d\n",
+                      ep_desc.EndpointAddress, ep_desc.Interval,
+                      ep_desc.MaxPacketSize, speed);
             }
+            break;   /* one interrupt IN endpoint per interface is enough */
         }
 
         if (found_kbd && found_mouse)
