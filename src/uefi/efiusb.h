@@ -32,8 +32,12 @@
 #define EFI_USB2_HC_PROTOCOL_GUID_INIT \
     { 0x3e745226, 0x9818, 0x45b6, {0xa2, 0xac, 0xd7, 0xcd, 0x0e, 0x8b, 0xa2, 0xbc} }
 
+/* NOTE: This GUID must match the value EDK2/OVMF actually installs.   */
+/* EDK2's MdePkg/Include/Protocol/UsbIo.h defines it as 0x44cf/...     */
+/* (the UEFI spec value), NOT the 0x44e9/... variant. Using the wrong  */
+/* GUID makes LocateHandleBuffer(ByProtocol) find 0 handles.           */
 #define EFI_USB_IO_PROTOCOL_GUID_INIT \
-    { 0x2B2F68D6, 0x0CD2, 0x44e9, {0x8C, 0x0C, 0xBB, 0xF9, 0x19, 0x17, 0xAD, 0x29} }
+    { 0x2B2F68D6, 0x0CD2, 0x44cf, {0x8E, 0x8B, 0xBB, 0xA2, 0x0B, 0x1B, 0x5B, 0x75} }
 
 static EFI_GUID EFI_USB2_HC_PROTOCOL_GUID = EFI_USB2_HC_PROTOCOL_GUID_INIT;
 static EFI_GUID EFI_USB_IO_PROTOCOL_GUID  = EFI_USB_IO_PROTOCOL_GUID_INIT;
