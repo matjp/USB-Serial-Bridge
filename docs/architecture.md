@@ -575,6 +575,69 @@ loaded**, and each layer is verified on **real hardware** (QEMU for fast iterati
 real hardware for confidence). The OS boot (Layer 3) is the final confirmation, not the
 primary test vehicle.
 
+### 9.2 Real-hardware test results — Toshiba Satellite P50 (2026-09-17)
+
+**Scope:** Layer 1 UEFI setup phase (U1 verify + discover, U3 reserve, U2 bring-up
+scaffold, harness). The bridge core (B1) is NOT yet running — U2 is still a scaffold
+(see §7.3 / task table), so this validates the entire boot-time setup path on real
+hardware, not the XHCI handoff itself.
+
+**Result: ✅ PASS — the UEFI setup phase completes and hands off to the next boot
+device.** The app boots, verifies XHCI ≥ 1.0, discovers the real USB keyboard and
+mouse, reserves memory, runs the (scaffold) core bring-up, and returns `EFI_SUCCESS`
+so the firmware boots the next device. No hang, no fault.
+
+**Observed console trace (abridged):**
+```
+BRIDGE-DBG: efi_main entered, InitializeLib done
+USB HID -> Virtual 8042 Port Bridge
+BRIDGE-DBG: calling uefi_verify_xhci
+BRIDGE-DBG: verify: LocateHandleBuffer(PciIo) -> Success, 22 handles
+... (xHCI found, BAR0/CAPLEN/HCIVERSION read via EFI_PCI_IO_PROTOCOL.Mem.Read)
+BRIDGE-DBG: uefi_verify_xhci returned Success
+BRIDGE-DBG: calling uefi_discover_usb
+BRIDGE-DBG: discover: handle 3 VID=0000045E PID=000007B2 class=00000003 sub=00000001 proto=00000001
+BRIDGE-DBG: discover:   KBD ep=00000081 int=4 maxpkt=8 speed=2
+BRIDGE-DBG: discover: handle 4 VID=0000045E PID=000007B2 class=00000003 sub=00000001 proto=00000002
+BRIDGE-DBG: discover:   MOUSE ep=00000082 int=1 maxpkt=10 speed=2
+BRIDGE-DBG: discover: done, found_kbd=1 found_mouse=1
+BRIDGE-DBG: uefi_discover_usb returned Success
+BRIDGE-DBG: calling uefi_reserve_memory
+BRIDGE-DBG: uefi_reserve_memory returned Success
+BRIDGE-DBG: calling uefi_bringup_highest_core
+BRIDGE-DBG: uefi_bringup_highest_core returned Success
+BRIDGE-DBG: calling uefi_check_bridge_fault
+BRIDGE-DBG: uefi_check_bridge_fault returned
+Bridge setup complete. Handing off to OS on core 0.
+```
+
+**Devices discovered (real hardware):**
+- **Keyboard:** VID=0x045E PID=0x07B2 (Microsoft), HID boot class 3/sub 1/proto 1,
+  interrupt IN ep 0x81, interval 4, max packet 8, speed 2 (full-speed).
+- **Mouse:** VID=0x045E PID=0x07B2 (Microsoft), HID boot class 3/sub 1/proto 2,
+  interrupt IN ep 0x82, interval 1, max packet 10, speed 2 (full-speed).
+
+**Bugs found and fixed during this real-hardware run:**
+1. **Hang at `uefi_verify_xhci` — direct MMIO dereference.** The app hung right after
+   `calling uefi_verify_xhci`. Root cause: `xhci_cap_read32()` dereferenced the xHCI
+   BAR0 MMIO region directly; on real hardware the PCI BAR region may not be mapped in
+   the UEFI app's page tables, so the load hung the CPU. **Fix (commit `c66eaf6`):**
+   read capability/operational registers via `EFI_PCI_IO_PROTOCOL.Mem.Read`
+   (`EfiPciIoWidthUint32`, BarIndex 0, offset) instead of a direct dereference.
+2. **Hang at `uefi_check_bridge_fault` — unzeroed reserved page.** After the MMIO fix,
+   the app hung at the bridge-fault check. Root cause: `BS->AllocatePages` does **not**
+   zero memory; the reserved page at `0x10000000` held stale garbage, so
+   `xhci_fault_lookup()` returned a non-NULL garbage pointer and dereferencing
+   `fault->magic` page-faulted. **Fix (commit `2bd7081`):** zero the reserved page
+   right after `AllocatePages` so the fault/status pointer slots read NULL until the
+   bridge publishes.
+
+**Not yet validated (expected, per §7.3):** the bridge core does not run yet (U2 is a
+scaffold), so there is no `BRIDGE OK: XHCI bring-up succeeded` marker and no
+`PRESS A KEY TO CONTINUE...` pause. Those appear only after the full AP bring-up
+(copy bridge code, AP GDT/page tables/stack, run `bridge_entry()` on the AP) is
+implemented.
+
 ---
 
 ## 10. Performance Analysis — Virtual 8042 Port + Virtual IRQ vs. Real PS/2

@@ -590,6 +590,16 @@ Implement in dependency order. Each task is independently verifiable.
 **Verification layers** (from architecture.md §9):
 - **Layer 0:** host unit tests, no QEMU/OS — B2, B3, B4, O1 logic. ✅ **DONE** (133 asserts: 33+30+10+40+20).
 - **Layer 1:** UEFI app + bridge, no OS — B1–B5, U1–U3. QEMU/OVMF + real hardware.
+  - ✅ **UEFI setup phase (U1 verify+discover, U3 reserve, U2 scaffold, harness) PASSED on
+    real hardware** (Toshiba Satellite P50, 2026-09-17): app boots, verifies XHCI ≥ 1.0,
+    discovers the real USB kbd/mouse (VID=0x045E PID=0x07B2, kbd ep 0x81 / mouse ep 0x82),
+    reserves memory, runs the scaffold bring-up, and hands off to the next boot device.
+    Two real-HW hangs found and fixed: (1) direct MMIO dereference in `uefi_verify_xhci`
+    → use `EFI_PCI_IO_PROTOCOL.Mem.Read` (commit `c66eaf6`); (2) unzeroed reserved page
+    in `uefi_check_bridge_fault` → zero the page after `AllocatePages` (commit `2bd7081`).
+  - ⏳ **Bridge core (B1 XHCI handoff) PENDING:** U2 is still a scaffold — the bridge code
+    is not loaded onto the AP, so `bridge_poll_usb()` never runs and no `BRIDGE OK` marker
+    is produced. Full AP bring-up is the remaining Layer 1 work.
 - **Layer 2:** O1 read against a stub PS/2 driver — real hardware. ✅ **Host portion DONE** (test_layer2_reader); real-hardware portion pending.
 - **Layer 3:** end-to-end OS boot (optional, final).
 
@@ -698,6 +708,12 @@ The implementation is complete when:
 3. **Layer 1 passes (QEMU + real hardware):** the UEFI app enumerates USB kbd/mouse,
    reserves memory, SIPI-starts the highest core, and the harness on core 0 reads the
    virtual port region and asserts the PS/2 byte stream — with **no OS loaded**.
+   - ✅ **UEFI setup phase PASSED on real hardware** (Toshiba Satellite P50, 2026-09-17):
+     verify XHCI, discover real kbd/mouse, reserve memory, scaffold bring-up, handoff.
+     See architecture.md §9.2 for the trace and the two real-HW bugs fixed.
+   - ⏳ **Bridge core (B1 XHCI handoff) PENDING:** U2 is a scaffold; the bridge code is
+     not loaded onto the AP, so `bridge_poll_usb()` never runs and no `BRIDGE OK` marker
+     is produced. Full AP bring-up is the remaining Layer 1 work.
 4. **Layer 2 passes (real hardware):** O1 read-and-clear + APIC EOI against a stub PS/2
    driver works correctly. ✅ **Host portion DONE** (`tests/test_layer2_reader.c`, 20
    asserts); real-hardware portion pending.
