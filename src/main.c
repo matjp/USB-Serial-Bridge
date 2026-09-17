@@ -22,16 +22,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 {
     EFI_STATUS status;
 
-    /* Raw console output BEFORE InitializeLib, so we can tell whether
-     * efi_main is even reached (the crash may be in _relocate/_entry/
-     * InitializeLib, before ST is set up). Uses systab->ConOut directly. */
-    if (systab && systab->ConOut && systab->ConOut->OutputString) {
-        systab->ConOut->OutputString(systab->ConOut, L"BRIDGE-DBG: efi_main entered (pre-InitializeLib)\r\n");
-    }
-
+    /* GNU-EFI requirement: InitializeLib MUST be the very first statement.
+     * It sets up the global ST/BS/RT pointers. Using Print() or accessing
+     * the SystemTable globals before this dereferences null/garbage and
+     * crashes (#UD). */
     InitializeLib(image, systab);
 
-    Print(L"BRIDGE-DBG: InitializeLib done\n");
+    Print(L"BRIDGE-DBG: efi_main entered, InitializeLib done\n");
     Print(L"USB HID -> Virtual 8042 Port Bridge\n");
 
     /* 1. Verify XHCI >= 1.0 (C6). */
