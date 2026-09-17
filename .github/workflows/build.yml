@@ -64,3 +64,79 @@ jobs:
           name: bootable
           path: build/bootable/
           if-no-files-found: error
+
+  # Boot the built firmware in QEMU + OVMF and assert the bridge genuinely
+  # brings up XHCI. This is the automated equivalent of the manual "did you
+  # test on OVMF?" check: it runs the exact artifact the build job produced
+  # (built on Ubuntu with the correct efi-app-x86_64 objcopy target) and fails
+  # the workflow if the bridge does not report a successful XHCI bring-up.
+  #
+  # We test the DEBUG build because it emits a strong, unambiguous success
+  # signal: "*** BRIDGE OK: XHCI bring-up succeeded ***" is printed only when
+  # the bridge core actually ran XHCI bring-up and published its status record
+  # (src/uefi/l1_harness.c print_bridge_status). The normal build's "Bridge
+  # setup complete" is weaker - it is also printed if the bridge never started
+  # (wait_for_bridge_fault returns NULL on timeout), which would be a false
+  # positive. Failure signals we look for: "BRIDGE FAULT", "ERROR:", or an x86
+  # exception (#GP/#PF) from a malformed image.
+  ovmf-test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Install QEMU + OVMF + mtools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf mtools
+
+      - name: Download debug EFI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-debug-efi
+          path: efi
+
+      - name: Create FAT32 disk image with the EFI app
+        run: |
+          rm -f /tmp/bridge.img
+          truncate -s 64M /tmp/bridge.img
+          mkfs.vfat -F 32 -n BRIDGE /tmp/bridge.img
+          mmd -i /tmp/bridge.img ::/EFI
+          mmd -i /tmp/bridge.img ::/EFI/BOOT
+          mcopy -i /tmp/bridge.img efi/bridge-debug.efi ::/EFI/BOOT/BOOTX64.EFI
+
+      - name: Boot in OVMF and check for success
+        run: |
+          cp /usr/share/OVMF/OVMF_VARS.fd /tmp/ovmf_vars.fd
+          # -smp 2 so the bridge has a real "highest core" to bring up via SIPI.
+          # qemu-xhci provides an XHCI >= 1.0 controller (the bridge's C6
+          # requirement); usb-kbd/usb-mouse attach to it and are enumerated by
+          # OVMF's USB stack so U1 can discover them via EFI_USB_IO_PROTOCOL.
+          # -nographic routes the UEFI console (ConOut) to stdio so the bridge's
+          # Print() output is captured. The debug build pauses on a keypress
+          # after printing BRIDGE OK, so we let it run to the timeout and grep
+          # the captured log.
+          timeout 45 qemu-system-x86_64 \
+            -machine q35,accel=tcg \
+            -cpu qemu64 \
+            -smp 2 \
+            -m 512M \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+            -drive if=pflash,format=raw,file=/tmp/ovmf_vars.fd \
+            -drive file=/tmp/bridge.img,format=raw,if=ide,index=0 \
+            -device qemu-xhci \
+            -device usb-kbd \
+            -device usb-mouse \
+            -nographic \
+            -serial mon:stdio > /tmp/ovmf.log 2>&1 || true
+          echo "=== OVMF boot log ==="
+          cat /tmp/ovmf.log
+          echo "=== Checking for XHCI bring-up success ==="
+          if grep -q "BRIDGE OK: XHCI bring-up succeeded" /tmp/ovmf.log; then
+            echo "OVMF TEST PASSED: bridge brought up XHCI"
+            exit 0
+          else
+            echo "OVMF TEST FAILED: XHCI bring-up success not reported"
+            echo "--- failure signals ---"
+            grep -iE "BRIDGE FAULT|ERROR:|#GP|#PF|Exception|panic|Unsupported" /tmp/ovmf.log || true
+            exit 1
+          fi
