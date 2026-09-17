@@ -116,8 +116,9 @@ build/$(TARGET).so: $(OBJS) $(CRT0)
 		-o $@ $(EFI_LIB)/libefi.a $(EFI_LIB)/libgnuefi.a
 
 build/$(TARGET).efi: build/$(TARGET).so
-	$(OBJCOPY) -j .text -j .sdata -j .data -j .dynamic -j .dynsym -j .rel* \
-		-j .rela* -j .reloc --target=efi-app-$(ARCH) $< $@
+	$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym \
+		-j .rel -j .rela -j .rel.* -j .rela.* -j .reloc \
+		--target=efi-app-$(ARCH) --subsystem=10 $< $@
 	@if [ "$(strip $(call efi_needs_patch,$@))" = "yes" ]; then \
 		$(PATCH_EFI) $@ $@ $(call efi_entry_rva,$<); \
 	else \
