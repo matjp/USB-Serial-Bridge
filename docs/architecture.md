@@ -1,7 +1,7 @@
 # USB HID → Virtual 8042 Port Bridge
 ## OS-Independent Architecture for USB Keyboard & Mouse on a PS/2-Only OS
 
-**Document version:** 1.3 (Layer 2 — O1 reader + stub harness implemented)
+**Document version:** 1.4 (Layer 2 done + performance analysis)
 **Status:** Approved
 **Author:** Principal Software Architect
 **Target hardware:** Modern UEFI PC, exactly one USB keyboard + one USB mouse, fixed topology (no hotplug, no other USB devices ever)
@@ -566,7 +566,155 @@ primary test vehicle.
 
 ---
 
-## 10. Task Routing
+## 10. Performance Analysis — Virtual 8042 Port + Virtual IRQ vs. Real PS/2
+
+This section compares the end-to-end performance of the virtual 8042 port + virtual IRQ
+solution against real PS/2 hardware/firmware (the classic "Legacy USB Support" path).
+
+### 10.1 The two paths compared
+
+**Real PS/2 (hardware/firmware):**
+```
+USB HID → [firmware "Legacy USB Support" in SMM] → real 8042 controller → IRQ1/IRQ12 (8259 PIC) → OS ISR → in 0x60
+```
+
+**This solution (virtual):**
+```
+USB HID → [bridge on highest core, TDM] → virtual 8042 port region (shared mem) → virtual IRQ (APIC IPI) → OS ISR → load from fixed address
+```
+
+Both paths are the **same architecture** — a firmware-side agent (SMM vs. the bridge)
+reads USB HID and feeds a PS/2-style byte stream to the OS's existing ISR-driven input
+path. The difference is the *transport* between producer and OS ISR: real 8042 I/O
+ports + PIC IRQ vs. shared-memory registers + APIC IPI.
+
+### 10.2 End-to-end latency budget
+
+The dominant cost in both designs is **USB polling**, not the delivery mechanism.
+
+| Stage | Real PS/2 (SMM) | Virtual (bridge) |
+|-------|-----------------|------------------|
+| USB HID poll interval | 1–5 ms (firmware periodic) | 1–5 ms (bridge periodic IN) |
+| HID → PS/2 translation | ~µs | ~µs (pure CPU) |
+| **Delivery to OS** | SMI trap + 8042 write | shared-mem write + `mfence` + IPI |
+| **Delivery cost** | ~2–4 µs (SMI entry/RSM) | **~1–3 µs** (IPI + ISR) |
+| OS ISR read | `in 0x60` (~1 µs) | load from fixed addr (~ns) |
+| **Total perceived latency** | **~2–8 ms** | **~2–8 ms** |
+
+**The virtual path is NOT slower than real PS/2.** Both are bounded by the USB poll
+interval (1–5 ms), which is ~1000× larger than the delivery overhead. The virtual
+delivery (IPI + shared-memory read) is actually *cheaper* than the real path's SMM trap
+(SMI entry/exit ~2–4 µs) and avoids the SMM↔OS context switch entirely.
+
+### 10.3 Where the virtual path is FASTER than real PS/2
+
+1. **No SMM context switch.** Real "Legacy USB Support" traps every `in 0x60`/`in 0x64`
+   into SMM (SMI entry + RSM, ~2–4 µs each). The virtual path is a plain shared-memory
+   read in the OS ISR — no privilege transition, no SMRAM save/restore.
+2. **No I/O-port trap overhead.** Real 8042 emulation traps each port access. The
+   virtual port is a direct load/store to a fixed address — a few ns.
+3. **No 8259 PIC round-trip.** The real path routes IRQ1/IRQ12 through the 8259 PIC
+   (virtual-wire mode). The virtual path uses the local APIC IPI directly — the same
+   mechanism the OS already uses for its own SMP IPIs (`MPInt`).
+4. **Lower ISR read cost.** `in 0x60` is a serialized I/O instruction (~1 µs,
+   uncacheable). A load from the virtual data address is a normal cached load (~ns).
+
+### 10.4 Where the virtual path has ADDED overhead (the honest costs)
+
+1. **The `mfence` on the producer.** Before setting the status bit, the bridge executes
+   `mfence` to guarantee the data byte is visible before the "ready" flag. `mfence` is
+   ~20–100 cycles (~10–30 ns) — negligible, but a cost the real 8042 doesn't have
+   (hardware ordering is implicit).
+2. **The IPI delivery.** Sending an IPI via the local APIC ICR and having the target
+   core take the interrupt adds ~1–3 µs (ICR write + interrupt delivery + ISR entry).
+   The real path's PIC IRQ is similar (~1–2 µs), so this is roughly a wash.
+3. **The APIC EOI.** The OS ISR must write 0 to the LAPIC EOI register (one extra MMIO
+   store, ~100 ns). The real path only does the PIC EOI. This is the one OS-side
+   accommodation and adds a trivial cost.
+4. **TDM scheduling on the highest core.** The bridge shares the highest core with the
+   OS's background task in a TDM slot. This means:
+   - The bridge only polls USB during its slot → **effective poll interval can be up to
+     2× the slot period** (worst case, the bridge misses its slot boundary and waits
+     for the next).
+   - The OS background task on that core loses a fraction of its time to the bridge
+     slot. This is a **CPU cost, not an input-latency cost** — core 0 (the main thread)
+     is unaffected.
+5. **Single-byte-in-flight handshake.** The 8042 model allows only one byte in flight.
+   The bridge writes a byte, waits for the OS to consume it (status bit clear), then
+   writes the next. For a multi-byte mouse packet (3 bytes) or an extended key (2
+   bytes), this serializes delivery. **Throughput is bounded by the OS's consumption
+   rate**, not the bridge's production rate. This is identical to the real 8042, so it
+   is not a regression — but it is a ceiling.
+
+### 10.5 Throughput analysis
+
+| Metric | Real PS/2 | Virtual |
+|--------|-----------|---------|
+| Max byte rate (single slot) | ~1 byte per ISR | ~1 byte per ISR (same) |
+| Keyboard (Set 1) | ~1 byte/event | ~1 byte/event |
+| Mouse (3-byte packet) | 3 ISRs/packet | 3 ISRs/packet |
+| **Sustained input rate** | bounded by USB poll (1–5 ms) | bounded by USB poll (1–5 ms) |
+| **Peak burst** | ~1 byte/µs (ISR rate) | ~1 byte/µs (ISR rate) |
+
+**Both are identical.** Human input (typing ~10 keys/s, mouse ~125–1000 Hz) is *far*
+below the ~1 byte/µs ISR rate. The single-byte-in-flight model is not a bottleneck for
+human input in either design.
+
+### 10.6 CPU overhead comparison
+
+| Cost | Real PS/2 (SMM) | Virtual (bridge) |
+|------|-----------------|------------------|
+| SMM trap per port read | ~2–4 µs × (poll volume) | — (none) |
+| Bridge poll loop | — | ~1–5 ms slot, low duty |
+| IPI + ISR per byte | ~1–2 µs | ~1–3 µs |
+| **CPU on core 0 (main thread)** | 0 (SMM is separate) | **0** (bridge on highest core) |
+| **CPU on highest core** | 0 | bridge TDM slot (small %) |
+
+**Key advantage:** the virtual design keeps **core 0 (the OS main thread) completely
+free** — the bridge runs on the highest core in its own TDM slot. The real SMM path also
+does not touch core 0's user time, but it does incur SMM entry/exit on *every* trapped
+port read, which the virtual path avoids entirely.
+
+### 10.7 The one real risk: TDM poll latency
+
+The most significant *new* latency source is the **TDM scheduling**. If the bridge's
+slot period is `T` and the bridge polls USB once per slot, the worst-case input latency
+is:
+
+$$\text{worst-case latency} \approx T_{\text{slot}} + T_{\text{USB poll}} + T_{\text{IPI}}$$
+
+With a 2 ms slot and 1–5 ms USB poll, worst case is ~3–7 ms. This is **imperceptible
+for human input** (human reaction time is ~200 ms; a keypress feels instant under
+~10 ms). The earlier SMM analysis reached the same conclusion: ~3 µs/trap × 10k reads/s
+≈ 3% core, imperceptible.
+
+### 10.8 Summary verdict
+
+| Dimension | Verdict |
+|-----------|---------|
+| **End-to-end latency** | **Equal** — both bounded by USB poll (1–5 ms); virtual delivery is cheaper than SMM trap |
+| **ISR read cost** | **Virtual faster** — cached load vs. serialized `in 0x60` |
+| **Delivery overhead** | **Roughly equal** — IPI ≈ PIC IRQ; virtual adds `mfence` + APIC EOI (both ~ns–µs) |
+| **CPU on main thread (core 0)** | **Equal (both 0)** — bridge on highest core, SMM separate |
+| **CPU on highest core** | **Virtual adds TDM slot** — small %, acceptable |
+| **Throughput** | **Equal** — both single-byte-in-flight, both far above human input rate |
+| **Worst-case latency** | **Virtual slightly higher** — TDM slot adds up to one slot period (~2 ms), still imperceptible |
+
+**Bottom line:** For human keyboard/mouse input, the virtual 8042 port + virtual IRQ
+solution is **performance-equivalent to real PS/2 hardware/firmware**, and in some
+respects (no SMM trap, cheaper ISR read) it is *faster*. The only new costs — the
+`mfence`, the APIC EOI, and the TDM slot — are all in the nanosecond-to-microsecond
+range and are dwarfed by the 1–5 ms USB poll interval that dominates both designs.
+There is no performance reason to prefer real PS/2 hardware; the virtual design's
+latency is imperceptible to a human user.
+
+The one thing to verify on real hardware (Layer 1) is the **actual TDM slot timing** —
+that the bridge reliably gets its slot and the poll interval stays within the 1–5 ms
+budget. This is open item §9 item 5, not a design flaw.
+
+---
+
+## 11. Task Routing
 
 | Task | Agent |
 |------|-------|
