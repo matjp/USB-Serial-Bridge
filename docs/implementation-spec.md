@@ -19,6 +19,15 @@
 - **Build:** `make -C /workspaces/USB-Serial-Bridge` produces `build/bridge.efi`.
   All sources are already wired into the Makefile. **Do not add new source files to the
   build** unless you also update `Makefile` `*_SRCS` and re-verify.
+- **Build platform (GitHub Actions only):** the firmware is built exclusively on GitHub
+  Actions (Ubuntu). Ubuntu's binutils ships the `efi-app-x86_64` objcopy target, so
+  `objcopy --target=efi-app-x86_64` emits a valid PE32+ UEFI image directly from the
+  linked `.so` — no post-processing. The build uses the **system** GNU-EFI crt0 and the
+  standard installed linker script (`/usr/lib/elf_x86_64_efi.lds`, via `EFI_LDS`); no
+  vendored crt0, linker script, or PE-patch script is needed. The CI workflow
+  (`.github/workflows/build.yml`) builds both `build/bridge.efi` and
+  `build-debug/bridge-debug.efi`, runs the host test suite, stages a bootable image, and
+  boots the debug image in QEMU+OVMF to assert XHCI bring-up succeeds.
 - **Existing headers are authoritative.** `include/hid.h`,
   `include/ps2.h`, `include/virtual_ps2.h` are the ABI. Do not change their public
   layout or the virtual-port byte-stream semantics (§6 of architecture.md). You may add

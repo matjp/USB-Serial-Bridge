@@ -527,6 +527,17 @@ design is proven before it.
   register snapshot (`USBSTS`/`USBCMD`/`CRCR`), controller capabilities, MMIO base +
   CAPLENGTH, and the discovered kbd/mouse endpoints — and the harness prints it to the
   console on success. The normal `bridge.efi` build is unchanged (silent on success).
+- **Build & CI (GitHub Actions only):** the firmware is built exclusively on GitHub
+  Actions (Ubuntu), whose binutils ships the `efi-app-x86_64` objcopy target, so
+  `objcopy --target=efi-app-x86_64` produces a valid PE32+ image directly from the
+  linked `.so` — no post-processing. The build uses the system GNU-EFI crt0 and the
+  standard installed linker script (`/usr/lib/elf_x86_64_efi.lds`); no vendored crt0,
+  linker script, or PE-patch script is required. The CI workflow
+  (`.github/workflows/build.yml`) builds both `build/bridge.efi` and
+  `build-debug/bridge-debug.efi`, runs the host test suite, stages a bootable image, and
+  boots the debug image in QEMU+OVMF, grepping for the `BRIDGE OK: XHCI bring-up
+  succeeded` marker to assert the bridge genuinely brought up XHCI (the normal build's
+  "Bridge setup complete" is a weaker signal and is not used as the CI pass criterion).
 - This covers B1, B2, B3, B4, B5, U1, U2, U3 — the entire bridge and boot-time
   path — without an OS, on both QEMU and real hardware.
 

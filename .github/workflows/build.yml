@@ -1,12 +1,8 @@
 # Build the USB HID -> Virtual 8042 Port Bridge UEFI firmware on GitHub Actions.
 #
-# Why CI instead of the local Alpine container:
-#   Alpine's binutils does not ship the `efi-app-x86_64` objcopy target, so the
-#   local build relies on tools/patch_efi.py to insert a PE32+ optional header
-#   by hand (a fragile workaround). Ubuntu's binutils DOES ship that target, so
-#   `objcopy --target=efi-app-x86_64` produces a correct UEFI image directly.
-#   The Makefile detects this (efi_needs_patch) and skips the patch step, so the
-#   same Makefile works both here and locally.
+# We build exclusively on GitHub Actions (Ubuntu). Ubuntu's binutils ships the
+# `efi-app-x86_64` objcopy target, so `objcopy --target=efi-app-x86_64` produces
+# a correct UEFI image directly from the linked .so - no post-processing needed.
 #
 # Artifacts:
 #   bridge-efi       -> build/bridge.efi            (normal, silent on success)

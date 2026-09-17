@@ -12,16 +12,12 @@ ARCH            := x86_64
 TARGET          := bridge
 DEBUG_TARGET    := bridge-debug
 
-# GNU-EFI install locations (Alpine: gnu-efi-dev)
+# GNU-EFI install locations (Ubuntu: gnu-efi)
 EFI_INC         ?= /usr/include/efi
 EFI_LIB         ?= /usr/lib
 EFI_CRT         ?= /usr/lib
-
-# Project-local PIC crt0. Alpine's prebuilt crt0-efi-x86_64.o is compiled
-# WITHOUT -fPIC and cannot be linked with -shared (PC32 relocations against
-# ImageBase/_DYNAMIC fail). We rebuild it from the GNU-EFI source with -fPIC
-# (see gnuefi/README.md) and use that here.
-CRT0            := gnuefi/crt0-efi-$(ARCH).o
+# Standard GNU-EFI x86_64 linker script (elf_x86_64_efi.lds)
+EFI_LDS         ?= $(EFI_LIB)/elf_x86_64_efi.lds
 
 CC              := gcc
 LD              := ld
@@ -29,9 +25,7 @@ OBJCOPY         := objcopy
 
 # We build on GitHub Actions (Ubuntu), whose binutils ships the
 # `efi-app-x86_64` objcopy target. objcopy therefore emits a valid PE32+ UEFI
-# image directly from the linked .so - no post-processing is needed. (The
-# local Alpine container lacks that target and would need tools/patch_efi.py,
-# but we do not build locally.)
+# image directly from the linked .so - no post-processing is needed.
 
 # --- Compiler flags ---------------------------------------------------------
 # -ffreestanding: no hosted runtime assumptions
@@ -51,9 +45,9 @@ CFLAGS          := -I$(EFI_INC) -I$(EFI_INC)/$(ARCH) -Iinclude \
 
 # --- Linker flags -----------------------------------------------------------
 # -nostdlib: no host crt0/libc
-# -T: our linker script
+# -T: the standard GNU-EFI linker script (elf_x86_64_efi.lds)
 # -shared: produce a relocatable PE image
-LDFLAGS         := -nostdlib -znocombreloc -T linker.lds -shared -Bsymbolic \
+LDFLAGS         := -nostdlib -znocombreloc -T $(EFI_LDS) -shared -Bsymbolic \
                    -L$(EFI_LIB) -L$(EFI_CRT)
 
 # --- Sources ----------------------------------------------------------------
@@ -90,8 +84,8 @@ build/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Link into a shared ELF, then convert to PE32+ (UEFI image)
-build/$(TARGET).so: $(OBJS) $(CRT0)
-	$(LD) $(LDFLAGS) $(OBJS) $(CRT0) \
+build/$(TARGET).so: $(OBJS)
+	$(LD) $(LDFLAGS) $(OBJS) \
 		-o $@ $(EFI_LIB)/libefi.a $(EFI_LIB)/libgnuefi.a
 
 build/$(TARGET).efi: build/$(TARGET).so
@@ -111,8 +105,8 @@ build-debug/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(DEBUG_CFLAGS) -c $< -o $@
 
-build-debug/$(DEBUG_TARGET).so: $(DEBUG_OBJS) $(CRT0)
-	$(LD) $(LDFLAGS) $(DEBUG_OBJS) $(CRT0) \
+build-debug/$(DEBUG_TARGET).so: $(DEBUG_OBJS)
+	$(LD) $(LDFLAGS) $(DEBUG_OBJS) \
 		-o $@ $(EFI_LIB)/libefi.a $(EFI_LIB)/libgnuefi.a
 
 build-debug/$(DEBUG_TARGET).efi: build-debug/$(DEBUG_TARGET).so
