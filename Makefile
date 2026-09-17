@@ -113,6 +113,30 @@ build-debug/$(DEBUG_TARGET).efi: build-debug/$(DEBUG_TARGET).so
 
 debug: build-debug/$(DEBUG_TARGET).efi
 
+# --- Bootable USB layout ----------------------------------------------------
+# UEFI firmware auto-boots removable media from the spec-mandated default
+# path \EFI\BOOT\BOOTX64.EFI (x86_64). The P50 has no UEFI Shell, so this
+# target stages the debug image under that path in the build dir. Copy the
+# whole build/bootable/ tree to the root of a FAT32 USB stick.
+#
+#   make bootable            -> build/bootable/EFI/BOOT/BOOTX64.EFI (debug)
+#   make bootable DEBUG=0    -> build/bootable/EFI/BOOT/BOOTX64.EFI (normal)
+BOOTABLE_DIR := build/bootable
+BOOTABLE_EFI := $(BOOTABLE_DIR)/EFI/BOOT/BOOTX64.EFI
+
+.PHONY: bootable
+
+bootable: build-debug/$(DEBUG_TARGET).efi build/$(TARGET).efi
+	@mkdir -p $(BOOTABLE_DIR)/EFI/BOOT
+	@if [ "$(DEBUG)" = "0" ]; then \
+		cp build/$(TARGET).efi $(BOOTABLE_EFI); \
+		echo "Staged normal build -> $(BOOTABLE_EFI)"; \
+	else \
+		cp build-debug/$(DEBUG_TARGET).efi $(BOOTABLE_EFI); \
+		echo "Staged debug build   -> $(BOOTABLE_EFI)"; \
+	fi
+	@echo "Copy the $(BOOTABLE_DIR)/ tree to the root of a FAT32 USB stick."
+
 clean:
 	rm -rf build build-debug
 
