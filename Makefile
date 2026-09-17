@@ -83,9 +83,14 @@ build/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Link into a shared ELF, then convert to PE32+ (UEFI image)
+# Link into a shared ELF, then convert to PE32+ (UEFI image).
+# The GNU-EFI crt0 (crt0-efi-x86_64.o) MUST be linked first: it provides the
+# _start entry point and the PE32+ header/relocation setup that objcopy needs
+# to emit a valid UEFI image. Without it the .so links (shared libs need no
+# defined entry point) but objcopy produces a malformed PE (bad signature),
+# which OVMF cannot load.
 build/$(TARGET).so: $(OBJS)
-	$(LD) $(LDFLAGS) $(OBJS) \
+	$(LD) $(LDFLAGS) $(EFI_CRT)/crt0-efi-$(ARCH).o $(OBJS) \
 		-o $@ $(EFI_LIB)/libefi.a $(EFI_LIB)/libgnuefi.a
 
 build/$(TARGET).efi: build/$(TARGET).so
@@ -106,7 +111,7 @@ build-debug/%.o: src/%.c
 	$(CC) $(DEBUG_CFLAGS) -c $< -o $@
 
 build-debug/$(DEBUG_TARGET).so: $(DEBUG_OBJS)
-	$(LD) $(LDFLAGS) $(DEBUG_OBJS) \
+	$(LD) $(LDFLAGS) $(EFI_CRT)/crt0-efi-$(ARCH).o $(DEBUG_OBJS) \
 		-o $@ $(EFI_LIB)/libefi.a $(EFI_LIB)/libgnuefi.a
 
 build-debug/$(DEBUG_TARGET).efi: build-debug/$(DEBUG_TARGET).so
