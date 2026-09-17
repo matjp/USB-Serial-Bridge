@@ -22,9 +22,10 @@
  * reserved region and publishes its address (see usb_topology.h). */
 USB_TOPOLOGY g_usb_topology;
 
-/* XHCI MMIO base (BAR0) and CAPLENGTH, recorded by uefi_verify_xhci() via
- * the PCI walk and consumed by uefi_discover_usb() to fill the topology. */
-static UINT32 g_xhci_mmio_base;
+/* XHCI MMIO base (BAR0, 64-bit) and CAPLENGTH, recorded by
+ * uefi_verify_xhci() via the PCI walk and consumed by
+ * uefi_discover_usb() to fill the topology. */
+static UINT64 g_xhci_mmio_base;
 static UINT32 g_xhci_cap_len;
 
 /* ------------------------------------------------------------------ */
@@ -46,7 +47,7 @@ pci_read_config32(EFI_PCI_IO_PROTOCOL *pci, UINT32 offset, UINT32 *value)
 /* Read a 32-bit XHCI capability register at the given offset from the
  * MMIO base. */
 static UINT32
-xhci_cap_read32(UINT32 mmio_base, UINT32 offset)
+xhci_cap_read32(UINT64 mmio_base, UINT32 offset)
 {
     volatile UINT32 *reg = (volatile UINT32 *)(UINTN)(mmio_base + offset);
     return *reg;
@@ -65,7 +66,7 @@ xhci_cap_read32(UINT32 mmio_base, UINT32 offset)
 /* Read a 32-bit XHCI PORTSC register for the given 1-based root-hub port.
  * op_base is the operational register base (mmio_base + CAPLENGTH). */
 static UINT32
-xhci_port_read32(UINT32 op_base, UINT32 port)
+xhci_port_read32(UINT64 op_base, UINT32 port)
 {
     volatile UINT32 *reg = (volatile UINT32 *)(UINTN)
         (op_base + XHCI_PORTSC_BASE + (port - 1) * XHCI_PORTSC_STRIDE);
@@ -76,9 +77,9 @@ xhci_port_read32(UINT32 op_base, UINT32 port)
 /* uefi_verify_xhci(): verify the host controller is XHCI >= 1.0 (C6).  */
 /*                                                                     */
 /* Preferred path: walk PCI for a device with class code 0x0C0330       */
-/* (USB 3.0 xHCI), read BAR0 (MMIO base) and the XHCI capability         */
-/* registers, and check the spec version in HCCPARAMS1 bits 31:24       */
-/* (>= 0x10 for 1.0).                                                   */
+/* (USB 3.0 xHCI), read BAR0 (MMIO base, 64-bit) and the XHCI            */
+/* capability registers, and check the spec version in HCIVERSION       */
+/* (capability offset 0x00, bits 16:31, BCD; 0x0100 = 1.0).             */
 /*                                                                     */
 /* Alternative path: locate EFI_USB2_HC_PROTOCOL and check Revision     */
 /* >= 0x00010000.                                                       */
@@ -96,8 +97,9 @@ uefi_verify_xhci(void)
     EFI_PCI_IO_PROTOCOL *pci = NULL;
     UINT32 class_code = 0;
     UINT32 bar0 = 0;
+    UINT32 bar0_hi = 0;
     UINT32 cap_len = 0;
-    UINT32 hccparams1 = 0;
+    UINT32 hciversion = 0;
     UINT32 spec_version = 0;
 
     /* --- Preferred path: PCI walk for class code 0x0C0330 (xHCI). --- */
@@ -129,27 +131,32 @@ uefi_verify_xhci(void)
         if (((class_code >> 24) & 0xFF) == 0x0C &&
             ((class_code >> 16) & 0xFF) == 0x03 &&
             ((class_code >> 8)  & 0xFF) == 0x30) {
-            /* Found the xHCI controller. Read BAR0 (config offset 0x10). */
+            /* Found the xHCI controller. Read BAR0 (config offset 0x10).
+             * BAR0 is a 64-bit MMIO BAR: the low 32 bits (offset 0x10)
+             * hold the low base bits (31:4) plus BAR attributes in the
+             * low 4 bits; the high 32 bits (offset 0x14) hold the upper
+             * base. Read both so the MMIO base is correct even when the
+             * BAR is allocated above 4 GB. */
             status = pci_read_config32(pci, 0x10, &bar0);
             if (EFI_ERROR(status))
                 continue;
+            status = pci_read_config32(pci, 0x14, &bar0_hi);
+            if (EFI_ERROR(status))
+                continue;
 
-            /* BAR0 is a 64-bit MMIO BAR; the low 32 bits hold the base
-             * (bits 31:4) with the low 4 bits as BAR attributes. Mask off
-             * the attribute bits to get the MMIO base. */
-            g_xhci_mmio_base = bar0 & 0xFFFFFFF0u;
+            g_xhci_mmio_base = ((UINT64)bar0_hi << 32) | (bar0 & 0xFFFFFFF0u);
 
             /* CAPLENGTH is the low byte of the first capability register
              * (offset 0x00 of the MMIO space). */
             cap_len = xhci_cap_read32(g_xhci_mmio_base, 0x00) & 0xFF;
             g_xhci_cap_len = cap_len;
 
-            /* HCCPARAMS1 is at capability offset 0x10. The XHCI spec
-             * version is in bits 31:24 (0x10 = 1.0). */
-            hccparams1 = xhci_cap_read32(g_xhci_mmio_base, cap_len + 0x10);
-            spec_version = (hccparams1 >> 24) & 0xFF;
+            /* The XHCI spec version is HCIVERSION at capability offset
+             * 0x00, bits 16:31, in BCD (0x0100 = 1.0). */
+            hciversion = xhci_cap_read32(g_xhci_mmio_base, 0x00);
+            spec_version = (hciversion >> 16) & 0xFFFF;
 
-            if (spec_version >= 0x10) {
+            if (spec_version >= 0x0100) {
                 /* XHCI >= 1.0 (C6). */
                 if (handles)
                     FreePool(handles);
@@ -209,7 +216,7 @@ record_root_hub_ports(void)
 {
     UINT32 hcsparams1;
     UINT32 max_ports;
-    UINT32 op_base;
+    UINT64 op_base;
     UINT32 port;
     UINT32 portsc;
     UINT32 speed;

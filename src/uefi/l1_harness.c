@@ -144,8 +144,8 @@ print_bridge_status(void)
 
     Print(L"\n");
     Print(L"*** BRIDGE OK: XHCI bring-up succeeded ***\n");
-    Print(L"  MMIO  : 0x%08X  CAPLEN: 0x%02X\n",
-          st->xhci_mmio_base, st->xhci_cap_len);
+    Print(L"  MMIO  : 0x%016llX  CAPLEN: 0x%02X\n",
+          (unsigned long long)st->xhci_mmio_base, st->xhci_cap_len);
     Print(L"  Slots : %d  Eps: %d  Scratch: %d  Page: 0x%04X\n",
           st->max_slots, st->max_eps, st->max_scratchpad, st->page_size);
     Print(L"  USBSTS: 0x%08X  USBCMD: 0x%08X  CRCR: 0x%08X\n",

@@ -13,7 +13,7 @@
  * a simulated controller instead of real MMIO.
  *
  * Failure modes exercised:
- *   - verify: HCCPARAMS1 spec version < 1.0  -> XHCI_STAGE_VERIFY
+ *   - verify: HCIVERSION spec version < 1.0  -> XHCI_STAGE_VERIFY
  *   - reset : USBSTS.HCH never set           -> XHCI_STAGE_RESET
  *
  * See docs/architecture.md section 9, Layer 1.
@@ -27,11 +27,10 @@
 
 /* --- Mock register file ------------------------------------------------ */
 /* A contiguous region that xhci_init() will interpret as the XHCI MMIO
- * space. xhci_mmio_base is a 32-bit value (as in the firmware), so we use a
- * FAKE low MMIO base and translate it to the real host array in the mock
- * accessors. This keeps the 32-bit pointer arithmetic in xhci.c valid on the
- * host (where the real array would live above 4 GB). */
-#define MOCK_MMIO_BASE  0x10000000u   /* fake 32-bit MMIO base */
+ * space. We use a FAKE low MMIO base and translate it to the real host
+ * array in the mock accessors, so the pointer arithmetic in xhci.c stays
+ * valid on the host (where the real array would live above 4 GB). */
+#define MOCK_MMIO_BASE  0x10000000u   /* fake MMIO base */
 #define MOCK_MMIO_SIZE  0x4000        /* 64 KB: cap+op+doorbell+rt */
 static UINT32 g_mock[MOCK_MMIO_SIZE / 4];
 
@@ -120,9 +119,10 @@ mock_reset(void)
     memset(g_mock, 0, sizeof(g_mock));
 
     /* Capability registers (relative to mmio base). */
+    g_mock[0x00 / 4] = 0x01000000;   /* HCIVERSION: 1.0 (BCD 0x0100, bits 16:31) */
     g_mock[0x04 / 4] = 0x00000001;   /* HCSPARAMS1: 1 slot, 1 ep */
     g_mock[0x08 / 4] = 0x00000000;   /* HCSPARAMS2 */
-    g_mock[0x10 / 4] = 0x10000000;   /* HCCPARAMS1: spec version 1.0 (bits31:24) */
+    g_mock[0x10 / 4] = 0x00000000;   /* HCCPARAMS1 */
     g_mock[0x14 / 4] = 0x00001000;   /* DBOFF: doorbell at mmio+0x1000 */
     g_mock[0x18 / 4] = 0x00002000;   /* RTSOFF: runtime at mmio+0x2000 */
 
@@ -163,11 +163,10 @@ main(void)
     printf("==========================================\n");
 
     /* --- Test 1: verify failure (spec version < 1.0) ------------------ */
-    printf("\n[Test 1] Verify failure (HCCPARAMS1 spec < 1.0)\n");
+    printf("\n[Test 1] Verify failure (HCIVERSION spec < 1.0)\n");
     mock_reset();
     xhci_test_reset();
-    g_mock[0x10 / 4] = 0x00000000;   /* spec version 0 -> not XHCI >= 1.0 */
-
+    g_mock[0x00 / 4] = 0x00000000;   /* HCIVERSION 0 -> not XHCI >= 1.0 */
     bridge_poll_usb();
     f = xhci_fault_get();
 

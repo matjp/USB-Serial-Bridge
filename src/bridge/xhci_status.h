@@ -32,7 +32,7 @@ typedef struct {
     UINT32 max_eps;         /* HCSPARAMS1: endpoints per slot */
     UINT32 max_scratchpad;  /* HCSPARAMS2: scratchpad buffers */
     UINT32 page_size;       /* PAGESIZE */
-    UINT32 xhci_mmio_base;  /* BAR0 (from topology) */
+    UINT64 xhci_mmio_base;  /* BAR0 (from topology, 64-bit) */
     UINT32 xhci_cap_len;    /* CAPLENGTH (from topology) */
     UINT32 kbd;             /* packed kbd endpoint: addr|ep<<8|int<<16|spd<<24 */
     UINT32 mouse;           /* packed mouse endpoint */

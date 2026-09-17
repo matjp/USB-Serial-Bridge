@@ -48,12 +48,13 @@ BOOLEAN g_mouse_valid = FALSE;
 /* ------------------------------------------------------------------ */
 
 /* Capability registers (relative to xhci_mmio_base). */
-#define XHCI_CAP_CAPLENGTH   0x00
-#define XHCI_CAP_HCSPARAMS1  0x04
-#define XHCI_CAP_HCSPARAMS2  0x08
-#define XHCI_CAP_HCCPARAMS1  0x10
-#define XHCI_CAP_DBOFF       0x14
-#define XHCI_CAP_RTSOFF      0x18
+#define XHCI_CAP_HCIVERSION   0x00
+#define XHCI_CAP_CAPLENGTH    0x00
+#define XHCI_CAP_HCSPARAMS1   0x04
+#define XHCI_CAP_HCSPARAMS2   0x08
+#define XHCI_CAP_HCCPARAMS1   0x10
+#define XHCI_CAP_DBOFF        0x14
+#define XHCI_CAP_RTSOFF       0x18
 
 /* Operational registers (relative to xhci_mmio_base + CAPLENGTH). */
 #define XHCI_OP_USBCMD       0x00
@@ -362,7 +363,7 @@ xhci_wait_bit_clear(volatile UINT32 *reg, UINT32 mask, UINTN timeout_loops)
 static void
 xhci_init(XHCI *xhci, const USB_TOPOLOGY *topo)
 {
-    UINT32 mmio = topo->xhci_mmio_base;
+    UINT64 mmio = topo->xhci_mmio_base;
     UINT32 cap_len = topo->xhci_cap_len;
     UINT32 db_off, rt_off;
     UINT32 hcsparams1, hcsparams2;
@@ -386,13 +387,14 @@ xhci_init(XHCI *xhci, const USB_TOPOLOGY *topo)
 }
 
 /* Verify the controller is XHCI >= 1.0 (C6). Belt-and-suspenders on top of
- * U1's check: read HCCPARAMS1 and check the spec version in bits 31:24. */
+ * U1's check: read HCIVERSION (capability offset 0x00, bits 16:31, BCD)
+ * and check it is >= 0x0100 (1.0). */
 static BOOLEAN
 xhci_verify_version(const XHCI *xhci)
 {
-    UINT32 hccparams1 = xhci_read32(&xhci->cap[XHCI_CAP_HCCPARAMS1 / 4]);
-    UINT32 spec_version = (hccparams1 >> 24) & 0xFF;
-    return spec_version >= 0x10;   /* 0x10 = XHCI 1.0 */
+    UINT32 hciversion = xhci_read32(&xhci->cap[XHCI_CAP_HCIVERSION / 4]);
+    UINT32 spec_version = (hciversion >> 16) & 0xFFFF;
+    return spec_version >= 0x0100;   /* 0x0100 = XHCI 1.0 */
 }
 
 /* ------------------------------------------------------------------ */
