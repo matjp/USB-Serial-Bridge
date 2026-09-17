@@ -144,17 +144,24 @@ uefi_verify_xhci(void)
     }
 
     for (i = 0; i < num_handles; i++) {
+        Print(L"BRIDGE-DBG: verify: loop i=%d/%d HandleProtocol\n",
+              i, num_handles);
         status = uefi_call_wrapper(
             BS->HandleProtocol, 3,
             handles[i], &gEfiPciIoProtocolGuid, (VOID **)&pci);
-        if (EFI_ERROR(status) || pci == NULL)
+        if (EFI_ERROR(status) || pci == NULL) {
+            Print(L"BRIDGE-DBG: verify:   HandleProtocol -> %r\n", status);
             continue;
+        }
 
         /* Read the class code at config offset 0x08 (registers 0x08-0x0B:
          * 0x08 = revision, 0x09 = prog-if, 0x0A = subclass, 0x0B = base
          * class). The 32-bit read at 0x08 gives base<<24 | sub<<16 |
          * progif<<8 | rev. We want base=0x0C, sub=0x03, progif=0x30. */
+        Print(L"BRIDGE-DBG: verify:   Pci.Read class @0x08\n");
         status = pci_read_config32(pci, 0x08, &class_code);
+        Print(L"BRIDGE-DBG: verify:   class=%08X status=%r\n",
+              class_code, status);
         if (EFI_ERROR(status))
             continue;
 
@@ -172,10 +179,15 @@ uefi_verify_xhci(void)
             Print(L"BRIDGE-DBG: verify: found xHCI at PCI handle %d, "
                   L"class=%08X\n", i, class_code);
             g_xhci_pci = pci;   /* retain for safe BAR0 MMIO reads */
+            Print(L"BRIDGE-DBG: verify:   Pci.Read BAR0 @0x10\n");
             status = pci_read_config32(pci, 0x10, &bar0);
+            Print(L"BRIDGE-DBG: verify:   BAR0=%08X status=%r\n", bar0, status);
             if (EFI_ERROR(status))
                 continue;
+            Print(L"BRIDGE-DBG: verify:   Pci.Read BAR0hi @0x14\n");
             status = pci_read_config32(pci, 0x14, &bar0_hi);
+            Print(L"BRIDGE-DBG: verify:   BAR0hi=%08X status=%r\n",
+                  bar0_hi, status);
             if (EFI_ERROR(status))
                 continue;
 
@@ -185,12 +197,14 @@ uefi_verify_xhci(void)
 
             /* CAPLENGTH is the low byte of the first capability register
              * (offset 0x00 of the MMIO space). */
+            Print(L"BRIDGE-DBG: verify:   Mem.Read CAPLEN @0x00\n");
             cap_len = xhci_cap_read32(g_xhci_mmio_base, 0x00) & 0xFF;
             g_xhci_cap_len = cap_len;
             Print(L"BRIDGE-DBG: verify: CAPLEN=%02X\n", cap_len);
 
             /* The XHCI spec version is HCIVERSION at capability offset
              * 0x00, bits 16:31, in BCD (0x0100 = 1.0). */
+            Print(L"BRIDGE-DBG: verify:   Mem.Read HCIVERSION @0x00\n");
             hciversion = xhci_cap_read32(g_xhci_mmio_base, 0x00);
             spec_version = (hciversion >> 16) & 0xFFFF;
             Print(L"BRIDGE-DBG: verify: HCIVERSION=%04X spec=%04X\n",
