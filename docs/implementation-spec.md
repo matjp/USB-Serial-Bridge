@@ -1,8 +1,8 @@
 # Firmware Coder Implementation Spec
 ## Exact interfaces, structs, and function signatures for B1–B5, U1–U3, O1
 
-**Document version:** 1.1 (virtual IRQ + virtual ports)
-**Status:** Approved — ready for implementation
+**Document version:** 1.2 (Layer 2 — O1 reader + stub harness implemented)
+**Status:** Approved — Layer 2 (O1) implemented; Layer 1 real-hardware bring-up pending
 **Author:** Principal Software Architect
 **Target:** GNU-EFI 4.0.2, x86_64 UEFI application (PE32+), ISO C99, no std headers
 **Source of truth:** `docs/architecture.md` (design), `include/*.h` (ABI), `src/**` (stubs)
@@ -382,13 +382,22 @@ void bridge_entry(void);
 keyboard/mouse ISR — which the bridge's virtual IRQ triggers — and feed the OS's
 existing PS/2 input handlers.
 
-**Public interface (already in `src/adapter/adapter.h`):**
+**Status:** ✅ **Implemented** (`src/adapter/virtual_ps2_reader.c`), validated by the
+Layer 2 stub harness (`tests/test_layer2_reader.c`, 20 assertions).
+
+**Public interface (in `src/adapter/adapter.h`):**
 ```c
 void adapter_read_virtual_ps2(void);
 void adapter_apic_eoi(void);
+
+/* Weak hooks (the only OS-specific part of O1). Default no-op in
+   virtual_ps2_reader.c; the OS or the Layer 2 stub overrides them. */
+void adapter_feed_kbd_byte(UINT8 byte);
+void adapter_feed_mouse_byte(UINT8 byte);
+void adapter_apic_eoi_write(UINT32 value);   /* routes the LAPIC EOI MMIO store */
 ```
 
-**Required implementation steps:**
+**Required implementation steps (implemented):**
 1. **Called from the ISR:** the bridge sends a virtual IRQ (IPI) on the device's vector
    (0x21 keyboard / 0x2C mouse) after writing a byte. The OS's existing ISR for that
    vector calls `adapter_read_virtual_ps2()`.
@@ -401,7 +410,17 @@ void adapter_apic_eoi(void);
    call `adapter_apic_eoi()` (write 0 to the LAPIC EOI register) in addition to the PIC
    EOI the OS already does. This is the one OS-side accommodation for the virtual IRQ.
 5. **O1 is OS-specific** only in the final feed step (which OS handler to call). The
-   read-and-clear of the virtual port and the APIC EOI are OS-independent.
+   read-and-clear of the virtual port and the APIC EOI are OS-independent. The feed
+   step is a **weak hook** (`adapter_feed_kbd_byte` / `adapter_feed_mouse_byte`) so the
+   repo stays OS-agnostic; the OS (or the Layer 2 stub) overrides it. The LAPIC EOI
+   MMIO store is routed through the weak `adapter_apic_eoi_write()` so the host test
+   can observe it (0xFEE000B0 is unmapped on the host).
+
+> **Consumer-side ABI accessors (added to `include/virtual_ps2.h`):** the design
+> specifies `virtual_ps2_read_data()` and `virtual_ps2_clear_status()` for the
+> read-and-clear, but the ABI header originally declared only the producer-side
+> accessors. These two consumer-side weak accessors were added (Architect-approved ABI
+> completion) so O1 can read the data byte and clear the status bit.
 
 > **OS-side change (documented, not implemented in this repo):** the OS's PS/2 driver
 > must replace its `in 0x60`/`in 0x64` reads with loads from the virtual port region,
@@ -552,7 +571,7 @@ Implement in dependency order. Each task is independently verifiable.
 | 2 | HID → PS/2 translator | B3 | `src/bridge/hid_ps2.c` | — | Layer 0 host test (pure C) |
 | 3 | HID report parser | B2 | `src/bridge/hid_parser.c` | — | Layer 0 host test (pure C) |
 | 4 | Virtual port writer + IRQ emitter | B4 | `src/bridge/virtual_ps2_writer.c` | 1 | Layer 0 host test |
-| 5 | Virtual port reader (ISR-driven) | O1 | `src/adapter/virtual_ps2_reader.c` | 1 | Layer 0 host test |
+| 5 | Virtual port reader (ISR-driven) | O1 | `src/adapter/virtual_ps2_reader.c` | 1 | ✅ Layer 0 host test (test_layer2_reader, 20 asserts) |
 | 6 | XHCI periodic-IN driver | B1 | `src/bridge/xhci.c` | 1, U1 | Layer 1 (QEMU + real HW) |
 | 7 | USB topology discovery | U1 | `src/uefi/usb_discovery.c` | — | Layer 1 |
 | 8 | Memory reservation | U3 | `src/uefi/mem_reserve.c` | 1 | Layer 1 |
@@ -561,9 +580,9 @@ Implement in dependency order. Each task is independently verifiable.
 | 11 | Second-OS virtual-port reader (portability demo) | O1' | new | 5 | Layer 2 |
 
 **Verification layers** (from architecture.md §9):
-- **Layer 0:** host unit tests, no QEMU/OS — B2, B3, B4, O1 logic.
+- **Layer 0:** host unit tests, no QEMU/OS — B2, B3, B4, O1 logic. ✅ **DONE** (133 asserts: 33+30+10+40+20).
 - **Layer 1:** UEFI app + bridge, no OS — B1–B5, U1–U3. QEMU/OVMF + real hardware.
-- **Layer 2:** O1 read against a stub PS/2 driver — real hardware.
+- **Layer 2:** O1 read against a stub PS/2 driver — real hardware. ✅ **Host portion DONE** (test_layer2_reader); real-hardware portion pending.
 - **Layer 3:** end-to-end OS boot (optional, final).
 
 ---
@@ -667,12 +686,13 @@ The implementation is complete when:
    with no warnings/errors.
 2. **Layer 0 passes:** host unit tests for B2, B3, B4, O1 (virtual port read/write
    correctness, virtual IRQ emission, HID→PS/2 translation, make/break, 0xE0 extended,
-   mouse packets).
+   mouse packets). ✅ **DONE** — 133 assertions pass.
 3. **Layer 1 passes (QEMU + real hardware):** the UEFI app enumerates USB kbd/mouse,
    reserves memory, SIPI-starts the highest core, and the harness on core 0 reads the
    virtual port region and asserts the PS/2 byte stream — with **no OS loaded**.
 4. **Layer 2 passes (real hardware):** O1 read-and-clear + APIC EOI against a stub PS/2
-   driver works correctly.
+   driver works correctly. ✅ **Host portion DONE** (`tests/test_layer2_reader.c`, 20
+   asserts); real-hardware portion pending.
 5. **Interface matches spec:** the virtual 8042 port ABI + virtual IRQ (§6 of
    architecture.md) is unchanged and the byte-stream format is exactly PS/2 Set 1 +
    3-byte mouse packets. Validated by the Architect.
@@ -692,6 +712,8 @@ The implementation is complete when:
    against the reference OS's `NORMAL_KEY_SCAN_DECODE_TABLE`.
 3. **Virtual port consumption handshake:** confirm the OS's PS/2 driver data reads are
    read-and-clear (a pure load does not clear the status bit, unlike a real 8042).
+   ✅ **Resolved by Layer 2 host test** (`tests/test_layer2_reader.c` validates the
+   read-and-clear + kbd-priority + APIC EOI behavior of O1).
 4. **Virtual IRQ delivery:** confirm the bridge can send an IPI via the local APIC ICR
    to core 0 on the device's vector (0x21 kbd / 0x2C mouse), and that the OS's ISR EOIs
    the local APIC (the virtual IRQ is APIC-sourced, not PIC-sourced). This is the one

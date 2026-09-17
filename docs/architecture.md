@@ -1,7 +1,7 @@
 # USB HID → Virtual 8042 Port Bridge
 ## OS-Independent Architecture for USB Keyboard & Mouse on a PS/2-Only OS
 
-**Document version:** 1.2 (virtual IRQ + virtual ports)
+**Document version:** 1.3 (Layer 2 — O1 reader + stub harness implemented)
 **Status:** Approved
 **Author:** Principal Software Architect
 **Target hardware:** Modern UEFI PC, exactly one USB keyboard + one USB mouse, fixed topology (no hotplug, no other USB devices ever)
@@ -353,6 +353,13 @@ bridge's virtual IRQ) do the read. The OS source is otherwise untouched.
 |--------|----------------|--------------|---------------|
 | **O1. Virtual port reader (ISR-driven)** | In the OS's keyboard/mouse ISR (triggered by the bridge's virtual IRQ): read the virtual status/data registers, read-and-clear the status bit, feed bytes to the OS's existing KBD/mouse handler, then EOI the local APIC | **Yes** (per-OS) | Tiny |
 
+> **O1 implementation status:** the OS-agnostic core of O1 is implemented in
+> `src/adapter/virtual_ps2_reader.c` (read-and-clear + APIC EOI), with the only
+> OS-specific part (the feed step) exposed as weak hooks
+> (`adapter_feed_kbd_byte` / `adapter_feed_mouse_byte`). It is validated by the Layer 2
+> stub harness (`tests/test_layer2_reader.c`). The per-OS wiring (which OS handler the
+> feed hooks call) is done in the OS, not this repo.
+
 > **How O1 hooks in without editing source:** the OS's PS/2 driver already reads the
 > 8042 ports from its ISRs and feeds its own input queue. Replacing `in 0x60`/`in 0x64`
 > with loads from the virtual port region (plus a read-and-clear of the status bit and a
@@ -529,9 +536,19 @@ design is proven before it.
   buffer), so the read-and-clear behavior is validated without the real OS.
 - This isolates O1 from the rest, so any OS-bring-up issue is not confused with a
   driver-read bug.
-- **Real hardware:** run the stub reader on the real PC (core 0) fed by the real
-  bridge (Layer 1 hardware), confirming the stub correctly reads the real virtual port
-  region and feeds the stub queue. This validates the read against real cross-core
+- ✅ **Host portion DONE:** `src/adapter/virtual_ps2_reader.c` (O1) is implemented and
+  validated by `tests/test_layer2_reader.c` — a stub harness that overrides the weak
+  accessors with a mock register file and the weak feed hooks with fake KBD/mouse
+  buffers. It asserts: no-pending returns without feeding/clearing; kbd byte fed + kbd
+  bit cleared; mouse byte fed + mouse bit cleared; kbd prioritized when both set; the
+  read-and-clear semantics (status bit cleared after read); and `adapter_apic_eoi()`
+  writes 0 to the LAPIC EOI (via the weak `adapter_apic_eoi_write()` hook). 20
+  assertions. The consumer-side ABI accessors `virtual_ps2_read_data()` /
+  `virtual_ps2_clear_status()` were added to `include/virtual_ps2.h` (Architect-approved
+  ABI completion).
+- **Real hardware (pending):** run the stub reader on the real PC (core 0) fed by the
+  real bridge (Layer 1 hardware), confirming the stub correctly reads the real virtual
+  port region and feeds the stub queue. This validates the read against real cross-core
   timing and ordering.
 
 **Layer 3 — End-to-end OS boot (optional, final):**
@@ -561,7 +578,7 @@ primary test vehicle.
 | U1 USB topology discovery | Firmware Coder |
 | U2 Highest-core bring-up (SIPI/GDT/stack/page tables) | Firmware Coder |
 | U3 Memory reservation | Firmware Coder |
-| O1 Virtual port reader (per-OS PS/2 driver read, ISR-driven + APIC EOI) | Firmware Coder |
+| O1 Virtual port reader (per-OS PS/2 driver read, ISR-driven + APIC EOI) | Firmware Coder — ✅ **DONE** (`src/adapter/virtual_ps2_reader.c` + Layer 2 stub harness) |
 | O1 reader for a second OS (portability demo) | Firmware Coder |
 | GNU-EFI Makefile, linker script, PE32+ | Builder |
 | Validate interface matches spec (§6) | Architect |
