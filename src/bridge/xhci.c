@@ -14,10 +14,9 @@
  * the bridge does NOT re-enumerate.
  *
  * NOTE: This is a hardware-validation (Layer 1) module. The register
- * programming follows the XHCI 1.x specification. Some values (e.g. the
- * root-hub port number in the slot context) are not recorded by U1 and are
- * set to documented placeholders; these are open items for the Architect to
- * confirm on real hardware (see the report).
+ * programming follows the XHCI 1.x specification. The root-hub port number
+ * in the slot context is recorded by U1 (usb_discovery.c) by scanning the
+ * root-hub PORTSC registers and is read from the topology here.
  */
 
 #include <efi.h>
@@ -561,14 +560,14 @@ xhci_setup_devices(XHCI *xhci, const USB_TOPOLOGY *topo)
     xhci_write32(&xhci->op[XHCI_OP_CONFIG / 4], MAX_DEVICES);
 
     /* Keyboard: device 1, slot context + interrupt IN endpoint. */
-    slot_context_init(&g_dev_ctx[0].slot, topo->kbd.speed, 1);
+    slot_context_init(&g_dev_ctx[0].slot, topo->kbd.speed, topo->kbd.port);
     ep_context_init(&g_dev_ctx[0].ep_in,
                     topo->kbd.max_packet,
                     topo->kbd.interval,
                     (UINT64)(UINTN)g_tr_kbd.trbs);
 
     /* Mouse: device 2, slot context + interrupt IN endpoint. */
-    slot_context_init(&g_dev_ctx[1].slot, topo->mouse.speed, 2);
+    slot_context_init(&g_dev_ctx[1].slot, topo->mouse.speed, topo->mouse.port);
     ep_context_init(&g_dev_ctx[1].ep_in,
                     topo->mouse.max_packet,
                     topo->mouse.interval,

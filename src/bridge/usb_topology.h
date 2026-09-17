@@ -28,6 +28,7 @@ typedef struct {
     UINT8  interval;      /* bInterval (in frames/microframes) */
     UINT16 max_packet;    /* wMaxPacketSize */
     UINT8  speed;         /* 0=full, 1=low, 2=high, 3=super (we only use low/full) */
+    UINT8  port;          /* root-hub port number (1-based) the device is on */
 } USB_ENDPOINT;
 
 /* Fixed topology: exactly one keyboard and one mouse. */

@@ -53,6 +53,26 @@ xhci_cap_read32(UINT32 mmio_base, UINT32 offset)
 }
 
 /* ------------------------------------------------------------------ */
+/* XHCI operational-register helpers (MMIO)                            */
+/* ------------------------------------------------------------------ */
+
+/* Root-hub PORTSC register layout (XHCI 1.x spec, section 5.4.8). */
+#define XHCI_PORTSC_BASE   0x400   /* PORTSC for port 1 (op base + 0x400) */
+#define XHCI_PORTSC_STRIDE 0x10    /* each PORTSC is 16 bytes apart */
+#define XHCI_PORTSC_CCS    0x1     /* bit 0: Current Connect Status */
+#define XHCI_PORTSC_SPEED  0x3C00  /* bits 10:13: device speed */
+
+/* Read a 32-bit XHCI PORTSC register for the given 1-based root-hub port.
+ * op_base is the operational register base (mmio_base + CAPLENGTH). */
+static UINT32
+xhci_port_read32(UINT32 op_base, UINT32 port)
+{
+    volatile UINT32 *reg = (volatile UINT32 *)(UINTN)
+        (op_base + XHCI_PORTSC_BASE + (port - 1) * XHCI_PORTSC_STRIDE);
+    return *reg;
+}
+
+/* ------------------------------------------------------------------ */
 /* uefi_verify_xhci(): verify the host controller is XHCI >= 1.0 (C6).  */
 /*                                                                     */
 /* Preferred path: walk PCI for a device with class code 0x0C0330       */
@@ -165,6 +185,82 @@ alt_path:
 }
 
 /* ------------------------------------------------------------------ */
+/* Root-hub port scan.                                                 */
+/*                                                                     */
+/* The XHCI slot context's Root Hub Port Number must match the physical */
+/* root-hub port the device is attached to, or the controller rejects   */
+/* the slot/endpoint (Context State Error). U1 records the real port    */
+/* numbers here by scanning the root-hub PORTSC registers directly.     */
+/*                                                                     */
+/* Port count = HCSPARAMS1 bits 31:24 (MaxPorts). HCSPARAMS1 is at      */
+/* capability offset 0x04. PORTSC for port N = op_base + 0x400 +        */
+/* (N-1)*0x10. CCS (bit 0) = device present; SPEED (bits 10:13) =       */
+/* 1=low, 2=full.                                                       */
+/*                                                                     */
+/* The two connected ports are matched to the discovered kbd/mouse by   */
+/* SPEED. If both devices are the same speed, they are assigned in      */
+/* port-scan order (first connected port = kbd, second = mouse), which  */
+/* matches the UEFI enumeration order for this fixed-topology design.   */
+/* If fewer than 2 connected ports are found, the ports are left as 0   */
+/* (B1 will still use them; the harness surfaces the fault).            */
+/* ------------------------------------------------------------------ */
+static void
+record_root_hub_ports(void)
+{
+    UINT32 hcsparams1;
+    UINT32 max_ports;
+    UINT32 op_base;
+    UINT32 port;
+    UINT32 portsc;
+    UINT32 speed;
+    UINT32 kbd_speed;
+    UINT32 mouse_speed;
+    BOOLEAN kbd_found = FALSE;
+    BOOLEAN mouse_found = FALSE;
+
+    if (g_xhci_mmio_base == 0)
+        return;
+
+    /* MaxPorts = HCSPARAMS1 bits 31:24 (capability offset 0x04). */
+    hcsparams1 = xhci_cap_read32(g_xhci_mmio_base, 0x04);
+    max_ports = (hcsparams1 >> 24) & 0xFF;
+    if (max_ports == 0)
+        return;
+
+    op_base = g_xhci_mmio_base + g_xhci_cap_len;
+
+    /* Convert the topology speed field (0=full, 1=low) to the PORTSC
+     * SPEED encoding (1=low, 2=full) so we can match by speed. */
+    kbd_speed   = (g_usb_topology.kbd.speed == 1) ? 1 : 2;
+    mouse_speed = (g_usb_topology.mouse.speed == 1) ? 1 : 2;
+
+    for (port = 1; port <= max_ports; port++) {
+        portsc = xhci_port_read32(op_base, port);
+
+        /* CCS (bit 0): a device is currently connected on this port. */
+        if ((portsc & XHCI_PORTSC_CCS) == 0)
+            continue;
+
+        /* SPEED (bits 10:13): 1=low, 2=full. */
+        speed = (portsc & XHCI_PORTSC_SPEED) >> 10;
+
+        /* Match by speed. If both devices share a speed, the first
+         * connected port is the kbd and the second is the mouse
+         * (port-scan order matches UEFI enumeration order). */
+        if (!kbd_found && speed == kbd_speed) {
+            g_usb_topology.kbd.port = (UINT8)port;
+            kbd_found = TRUE;
+        } else if (!mouse_found && speed == mouse_speed) {
+            g_usb_topology.mouse.port = (UINT8)port;
+            mouse_found = TRUE;
+        }
+
+        if (kbd_found && mouse_found)
+            break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* uefi_discover_usb(): find the single boot-protocol keyboard and      */
 /* mouse, record their interrupt IN endpoints into g_usb_topology.      */
 /* ------------------------------------------------------------------ */
@@ -274,6 +370,9 @@ uefi_discover_usb(void)
 
     if (!found_kbd || !found_mouse)
         return EFI_NOT_FOUND;
+
+    /* Record the real root-hub port numbers for the slot context. */
+    record_root_hub_ports();
 
     return EFI_SUCCESS;
 }

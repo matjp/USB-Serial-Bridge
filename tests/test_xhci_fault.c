@@ -141,6 +141,8 @@ mock_reset(void)
     g_topo.mouse.max_packet = 3;
     g_topo.kbd.speed      = 1;      /* low speed */
     g_topo.mouse.speed    = 1;
+    g_topo.kbd.port       = 1;      /* root-hub port 1 */
+    g_topo.mouse.port     = 2;      /* root-hub port 2 */
 }
 
 /* bridge_poll_usb() is declared in bridge.h. */
