@@ -1,7 +1,7 @@
 # Firmware Coder Implementation Spec
 ## Exact interfaces, structs, and function signatures for B1–B5, U1–U3, O1
 
-**Document version:** 1.0
+**Document version:** 1.1 (virtual IRQ + virtual ports)
 **Status:** Approved — ready for implementation
 **Author:** Principal Software Architect
 **Target:** GNU-EFI 4.0.2, x86_64 UEFI application (PE32+), ISO C99, no std headers
@@ -300,11 +300,12 @@ void bridge_translate_ps2(void);
 > the OS decodes bytes identically to a real PS/2 keyboard. Verify against the
 > reference OS (TempleOS `Keyboard.HC`).
 
-### 2.4 B4 — Virtual 8042 port writer (`src/bridge/virtual_ps2_writer.c`)
+### 2.4 B4 — Virtual 8042 port writer + IRQ emitter (`src/bridge/virtual_ps2_writer.c`)
 
 **Responsibility:** Write the translated PS/2 byte stream into the virtual 8042 port
 region (see `include/virtual_ps2.h`), with faithful 8042 single-output-buffer
-semantics.
+semantics, and send the **virtual IRQ** so the OS's existing ISR-driven input path
+fires.
 
 **Public interface (already in `src/bridge/bridge.h`):**
 ```c
@@ -319,18 +320,23 @@ void bridge_virtual_ps2_reset(void);   /* reset write cursors (host tests) */
 2. **Write one byte:** keyboard first (priority), then mouse. Write the byte to the
    virtual data register, `mfence()`, then set the status bit (`STAT_KBD` or
    `STAT_MOUSE`).
-3. **Write cursor:** B3 regenerates the full packet each poll, but the 8042 allows only
+3. **Send the virtual IRQ:** after the data byte is written and the status bit is set,
+   call `virtual_ps2_send_irq(VIRTUAL_PS2_IRQ_KBD)` (or `_MOUSE`). This delivers an IPI
+   via the local APIC ICR to the OS core on the device's vector, so the OS's existing
+   keyboard/mouse ISR fires and reads the virtual data port. The IRQ is sent only after
+   the status bit is set, so the data is visible when the ISR runs.
+4. **Write cursor:** B3 regenerates the full packet each poll, but the 8042 allows only
    one byte in flight. Maintain a per-device write cursor (`g_vp_kbd_idx`,
    `g_vp_mouse_idx`) that advances through the regenerated packet one byte per poll, so
    a multi-byte packet (e.g. the 3-byte mouse packet) is emitted byte-by-byte across
    polls. Reset a cursor when it reaches the stream's count.
-4. **Consume the streams:** reset `g_ps2_kbd_stream.count = 0` and
+5. **Consume the streams:** reset `g_ps2_kbd_stream.count = 0` and
    `g_ps2_mouse_stream.count = 0` after writing. Bytes not yet written are dropped
    (input is lossy — the latest HID state is what matters).
-5. **Weak accessors:** the writer reads/writes the fixed addresses via weak functions
-   (`virtual_ps2_read_status`, `virtual_ps2_write_data`, `virtual_ps2_set_status`) so
-   host tests can override them with a mock register file (the fixed addresses are
-   unmapped on the host).
+6. **Weak accessors:** the writer reads/writes the fixed addresses and sends the IRQ via
+   weak functions (`virtual_ps2_read_status`, `virtual_ps2_write_data`,
+   `virtual_ps2_set_status`, `virtual_ps2_send_irq`) so host tests can override them
+   with a mock register file (the fixed addresses are unmapped on the host).
 
 ### 2.5 B5 — Bridge core entry / poll loop (`src/bridge/bridge_entry.c`)
 
@@ -370,34 +376,44 @@ void bridge_entry(void);
 
 ## 3. Input Adapter Modules (O1) — core 0, per-OS
 
-### 3.1 O1 — Virtual port reader (OS PS/2 driver read)
+### 3.1 O1 — Virtual port reader (OS PS/2 driver read, ISR-driven)
 
-**Responsibility:** Read the virtual 8042 port region (consumer side) and feed the
-OS's existing PS/2 input handlers.
+**Responsibility:** Read the virtual 8042 port region (consumer side) from the OS's
+keyboard/mouse ISR — which the bridge's virtual IRQ triggers — and feed the OS's
+existing PS/2 input handlers.
 
 **Public interface (already in `src/adapter/adapter.h`):**
 ```c
 void adapter_read_virtual_ps2(void);
+void adapter_apic_eoi(void);
 ```
 
 **Required implementation steps:**
-1. Read the virtual status register. If no status bit is set (`VIRTUAL_PS2_STAT_ANY`),
+1. **Called from the ISR:** the bridge sends a virtual IRQ (IPI) on the device's vector
+   (0x21 keyboard / 0x2C mouse) after writing a byte. The OS's existing ISR for that
+   vector calls `adapter_read_virtual_ps2()`.
+2. Read the virtual status register. If no status bit is set (`VIRTUAL_PS2_STAT_ANY`),
    there is no pending byte — return.
-2. Read the virtual data register, then **read-and-clear** the status bit (a pure load
+3. Read the virtual data register, then **read-and-clear** the status bit (a pure load
    does NOT clear it, unlike a real 8042). Feed the byte to the OS's existing KBD/mouse
    handler, disambiguated by which status bit was set (`STAT_KBD` vs `STAT_MOUSE`).
-3. **O1 is OS-specific** only in the final feed step (which OS handler to call). The
-   read-and-clear of the virtual port is OS-independent.
+4. **EOI the local APIC:** the virtual IRQ is APIC-sourced (an IPI), so the ISR must
+   call `adapter_apic_eoi()` (write 0 to the LAPIC EOI register) in addition to the PIC
+   EOI the OS already does. This is the one OS-side accommodation for the virtual IRQ.
+5. **O1 is OS-specific** only in the final feed step (which OS handler to call). The
+   read-and-clear of the virtual port and the APIC EOI are OS-independent.
 
 > **OS-side change (documented, not implemented in this repo):** the OS's PS/2 driver
 > must replace its `in 0x60`/`in 0x64` reads with loads from the virtual port region,
-> and its data reads must be read-and-clear. This is the minimal OS change — the OS
-> reuses 100% of its existing decoder/parser/PutKey logic.
+> its data reads must be read-and-clear, and its ISRs must EOI the local APIC. This is
+> the minimal OS change — the OS reuses 100% of its existing decoder/parser/PutKey
+> logic, and the bridge's virtual IRQ triggers the OS's existing ISR path.
 
 > **O2 (input injection) is no longer a separate module.** In the virtual-port design,
-> the OS's own PS/2 driver reads the virtual port directly and feeds its existing input
-> path — there is no separate injection adapter. The only OS-side change is the
-> read-and-clear at the data-read sites (documented above, implemented in the OS, not
+> the OS's own PS/2 driver reads the virtual port directly from its ISR and feeds its
+> existing input path — there is no separate injection adapter. The only OS-side change
+> is the read-and-clear at the data-read sites plus the APIC EOI (documented above,
+> implemented in the OS, not
 > in this repo).
 
 ---
@@ -535,13 +551,13 @@ Implement in dependency order. Each task is independently verifiable.
 | 1 | Virtual 8042 port ABI (already done) | — | `include/virtual_ps2.h`, `src/bridge/virtual_ps2_writer.c` | — | Layer 0 host test |
 | 2 | HID → PS/2 translator | B3 | `src/bridge/hid_ps2.c` | — | Layer 0 host test (pure C) |
 | 3 | HID report parser | B2 | `src/bridge/hid_parser.c` | — | Layer 0 host test (pure C) |
-| 4 | Virtual port writer | B4 | `src/bridge/virtual_ps2_writer.c` | 1 | Layer 0 host test |
-| 5 | Virtual port reader | O1 | `src/adapter/virtual_ps2_reader.c` | 1 | Layer 0 host test |
+| 4 | Virtual port writer + IRQ emitter | B4 | `src/bridge/virtual_ps2_writer.c` | 1 | Layer 0 host test |
+| 5 | Virtual port reader (ISR-driven) | O1 | `src/adapter/virtual_ps2_reader.c` | 1 | Layer 0 host test |
 | 6 | XHCI periodic-IN driver | B1 | `src/bridge/xhci.c` | 1, U1 | Layer 1 (QEMU + real HW) |
 | 7 | USB topology discovery | U1 | `src/uefi/usb_discovery.c` | — | Layer 1 |
 | 8 | Memory reservation | U3 | `src/uefi/mem_reserve.c` | 1 | Layer 1 |
 | 9 | Highest-core bring-up + TDM | U2, B5 | `src/uefi/core_bringup.c`, `src/bridge/bridge_entry.c`, `src/bridge/tdm.h` | 6,7,8 | Layer 1 (real HW) |
-| 10 | OS PS/2 driver read-and-clear (in the OS, not this repo) | O1 | OS source | 5 | Layer 3 (OS boot) |
+| 10 | OS PS/2 driver read-and-clear + APIC EOI (in the OS, not this repo) | O1 | OS source | 5 | Layer 3 (OS boot) |
 | 11 | Second-OS virtual-port reader (portability demo) | O1' | new | 5 | Layer 2 |
 
 **Verification layers** (from architecture.md §9):
@@ -650,19 +666,20 @@ The implementation is complete when:
 1. **Builds clean:** `make -C /workspaces/USB-Serial-Bridge` produces `build/bridge.efi`
    with no warnings/errors.
 2. **Layer 0 passes:** host unit tests for B2, B3, B4, O1 (virtual port read/write
-   correctness, HID→PS/2 translation, make/break, 0xE0 extended, mouse packets).
+   correctness, virtual IRQ emission, HID→PS/2 translation, make/break, 0xE0 extended,
+   mouse packets).
 3. **Layer 1 passes (QEMU + real hardware):** the UEFI app enumerates USB kbd/mouse,
    reserves memory, SIPI-starts the highest core, and the harness on core 0 reads the
    virtual port region and asserts the PS/2 byte stream — with **no OS loaded**.
-4. **Layer 2 passes (real hardware):** O1 read-and-clear against a stub PS/2 driver
-   works correctly.
-5. **Interface matches spec:** the virtual 8042 port ABI (§6 of architecture.md) is
-   unchanged and the byte-stream format is exactly PS/2 Set 1 + 3-byte mouse packets.
-   Validated by the Architect.
+4. **Layer 2 passes (real hardware):** O1 read-and-clear + APIC EOI against a stub PS/2
+   driver works correctly.
+5. **Interface matches spec:** the virtual 8042 port ABI + virtual IRQ (§6 of
+   architecture.md) is unchanged and the byte-stream format is exactly PS/2 Set 1 +
+   3-byte mouse packets. Validated by the Architect.
 6. **XHCI ≥ 1.0 only (C6):** verified at boot; clean abort if not XHCI ≥ 1.0. No
    SuperSpeed, no EHCI/UHCI/OHCI.
-7. **OS-independent:** only the OS-side read-and-clear (O1) is OS-specific; the bridge
-   + virtual port ABI are untouched for a different OS.
+7. **OS-independent:** only the OS-side read-and-clear + APIC EOI (O1) is OS-specific;
+   the bridge + virtual port ABI are untouched for a different OS.
 
 ---
 
@@ -675,5 +692,9 @@ The implementation is complete when:
    against the reference OS's `NORMAL_KEY_SCAN_DECODE_TABLE`.
 3. **Virtual port consumption handshake:** confirm the OS's PS/2 driver data reads are
    read-and-clear (a pure load does not clear the status bit, unlike a real 8042).
-4. **TDM slot length:** choose a slot length (e.g. 1–5 ms) that gives the bridge enough
+4. **Virtual IRQ delivery:** confirm the bridge can send an IPI via the local APIC ICR
+   to core 0 on the device's vector (0x21 kbd / 0x2C mouse), and that the OS's ISR EOIs
+   the local APIC (the virtual IRQ is APIC-sourced, not PIC-sourced). This is the one
+   OS-side accommodation for the virtual IRQ design.
+5. **TDM slot length:** choose a slot length (e.g. 1–5 ms) that gives the bridge enough
    time to poll USB without starving the OS background task.

@@ -1,7 +1,7 @@
 # USB HID → Virtual 8042 Port Bridge
 ## OS-Independent Architecture for USB Keyboard & Mouse on a PS/2-Only OS
 
-**Document version:** 1.1 (virtual-port delivery)
+**Document version:** 1.2 (virtual IRQ + virtual ports)
 **Status:** Approved
 **Author:** Principal Software Architect
 **Target hardware:** Modern UEFI PC, exactly one USB keyboard + one USB mouse, fixed topology (no hotplug, no other USB devices ever)
@@ -12,14 +12,17 @@
 ## 1. Problem Statement
 
 A modern UEFI PC has only USB keyboard and mouse. We must run an OS whose input path
-accepts a **polled serial keyboard/mouse interface** (PS/2-style byte stream), without
-adding any USB code to that OS's source, and without modifying firmware.
+accepts a **PS/2-style serial keyboard/mouse interface** (a byte stream driven by the
+OS's existing keyboard/mouse ISRs), without adding any USB code to that OS's source,
+and without modifying firmware.
 
 The solution is a **standalone bridge** that runs on a dedicated CPU core, reads the USB
 HID devices, translates their reports into a standard PS/2 byte stream, and delivers it
-to the OS through a **virtual 8042 port region** in shared memory. The OS reads the
-virtual status/data registers directly — replacing its `in 0x60`/`in 0x64` instructions
-with loads from fixed addresses — so **no per-OS input adapter is required**.
+to the OS through a **virtual 8042 port region** in shared memory, plus a **virtual
+interrupt** that triggers the OS's existing ISR-driven input path. The OS reads the
+virtual status/data registers from its keyboard/mouse ISRs — replacing its
+`in 0x60`/`in 0x64` instructions with loads from fixed addresses — so **no per-OS input
+adapter is required**.
 
 ---
 
@@ -29,8 +32,8 @@ with loads from fixed addresses — so **no per-OS input adapter is required**.
 |---|-----------|-------------|
 | C1 | **No USB code in the OS codebase/source.** Code loaded into memory does not count as modifying the OS | USB code lives only in loaded components (the bridge). The OS source is untouched |
 | C2 | Loadable on **any modern PC, including locked-down firmware** | No firmware reflash, no SMM install, no reliance on VT-x/AMD-V |
-| C3 | **Minimal code** | Avoid a full USB stack; avoid 8042/PS-2 emulation, IRQ injection, and I/O-port trapping |
-| C4 | OS input path may be adapted via a lightweight **polled serial** interface (non-USB) | The OS's PS/2 driver reads the virtual port region and feeds its existing input handlers |
+| C3 | **Minimal code** | Avoid a full USB stack; avoid 8042/PS-2 emulation and I/O-port trapping. The virtual IRQ is a software IPI (the OS's own primitive), not hardware emulation |
+| C4 | OS input path may be adapted via a lightweight **serial** interface (non-USB) | The OS's PS/2 driver reads the virtual port region from its existing ISRs and feeds its existing input handlers |
 | C5 | **Standalone bridge** — runs in its own process/thread, separate from the OS | A distinct execution context, not code inside the OS |
 | C6 | **XHCI ≥ 1.0 only** — the USB host controller must be an XHCI controller at spec version 1.0 or later | The bridge drives XHCI directly. No EHCI/UHCI/OHCI support. XHCI 1.0+ is universal on modern PCs. **Note:** this is about the *controller spec version*, not about USB 3.0 SuperSpeed — keyboards/mice are low/full-speed devices and never use SuperSpeed |
 
@@ -56,17 +59,19 @@ bridge and the virtual port ABI are reused unchanged.
 
 **What "same serial keyboard/mouse interface" means:** the virtual port region delivers
 a byte stream in a fixed, documented format — PS/2 Set 1 scancodes for the keyboard,
-3-byte PS/2 packets for the mouse. Any OS whose input layer reads a polled byte stream
-of that format can be loaded.
+3-byte PS/2 packets for the mouse — and the virtual IRQ triggers the OS's existing
+keyboard/mouse ISRs. Any OS whose input layer reads that byte stream from its ISRs can
+be loaded.
 
 **Per-OS contract** — the three things each OS must provide:
 1. **Reserve** the bridge + virtual port region so the OS never allocates over it
    (mechanism is OS-specific, e.g. an E820 carve-out).
 2. **Leave the highest core available** to the bridge's TDM slot (or, on a single-core
    target, tolerate the TDM context switch on core 0).
-3. **Read the virtual port region** instead of the real 8042 ports: replace `in 0x60` /
-   `in 0x64` with loads from the virtual data/status addresses, and **read-and-clear**
-   the status bit when consuming a data byte (see §6).
+3. **Read the virtual port region** from its keyboard/mouse ISRs instead of the real
+   8042 ports: replace `in 0x60` / `in 0x64` with loads from the virtual data/status
+   addresses, **read-and-clear** the status bit when consuming a data byte, and **EOI
+   the local APIC** in the ISR (the virtual IRQ is APIC-sourced; see §6).
 
 These three are the entire per-OS surface. Everything else is shared.
 
@@ -117,13 +122,15 @@ flowchart LR
   - XHCI ≥ 1.0 is **universal** on modern PCs (all USB 3.x controllers are XHCI 1.0+),
     so the C6 requirement does not meaningfully narrow the target set.
 - **C3 (minimal code):** Fixed topology lets us enumerate once via UEFI and only do
-  periodic IN transfers at runtime. Because the OS input path is a polled serial
-  interface, we **do not** need to emulate the 8042/PS-2 controller, inject IRQs, or
-  trap I/O ports. The virtual port region is a tiny shared-memory mirror of the 8042's
-  two registers.
-- **C4 (polled serial interface):** The virtual 8042 port region is the lightweight
-  polled interface. The OS's existing PS/2 driver reads it directly — no separate
-  adapter component is needed.
+  periodic IN transfers at runtime. Because the OS input path is a serial interface
+  driven by its existing ISRs, we **do not** need to emulate the 8042/PS-2 controller
+  or trap I/O ports. The virtual port region is a tiny shared-memory mirror of the
+  8042's two registers, and the virtual IRQ is a software IPI (the OS's own primitive),
+  not hardware emulation.
+- **C4 (serial interface):** The virtual 8042 port region is the lightweight serial
+  interface, and the virtual IRQ triggers the OS's existing keyboard/mouse ISRs. The
+  OS's existing PS/2 driver reads it directly from its ISRs — no separate adapter
+  component is needed.
 - **C5 (standalone = own process/thread):** The bridge runs on the **highest core**,
   time-division-multiplexed with the OS's task on that same core. It is a separate
   execution context from the OS main thread (which stays on core 0), giving the bridge
@@ -214,7 +221,7 @@ translation (HID→PS/2 Set 1 is a well-defined, small mapping table).
 
 ---
 
-## 6. Interface Specification — Virtual 8042 Port Region (the OS-agnostic ABI)
+## 6. Interface Specification — Virtual 8042 Port Region + Virtual IRQ (the OS-agnostic ABI)
 
 This is the **formal interface contract** that makes the solution OS-independent. Any
 OS that reads the virtual port region can be loaded. The bridge is the producer; the
@@ -222,7 +229,8 @@ OS's PS/2 driver is the consumer. The ABI is fixed and versioned — the bridge 
 OS must agree on it, but neither depends on the other's OS.
 
 A small shared-memory region in the reserved area that **mirrors the real 8042
-controller's two I/O registers**:
+controller's two I/O registers**, plus a **virtual interrupt** that triggers the OS's
+existing ISR-driven input path:
 
 ```c
 #define VIRTUAL_PS2_BASE    0x10000030u   /* fixed physical address */
@@ -232,6 +240,12 @@ controller's two I/O registers**:
 #define VIRTUAL_PS2_STAT_KBD    0x01u   /* bit0: keyboard output buffer full */
 #define VIRTUAL_PS2_STAT_MOUSE  0x20u   /* bit5: mouse output buffer full */
 #define VIRTUAL_PS2_STAT_ANY    (VIRTUAL_PS2_STAT_KBD | VIRTUAL_PS2_STAT_MOUSE)
+
+/* Virtual IRQ vectors: the bridge delivers an IPI on the SAME vector the OS
+   already uses for that device, so the OS's existing ISR fires and reads the
+   virtual data port. (Reference OS vectors: IRQ1 = 0x21 kbd, IRQ12 = 0x2C mouse.) */
+#define VIRTUAL_PS2_IRQ_KBD    0x21u
+#define VIRTUAL_PS2_IRQ_MOUSE  0x2Cu
 ```
 
 **Faithful 8042 semantics (verified against the reference OS source):**
@@ -244,22 +258,24 @@ controller's two I/O registers**:
 
 **Producer (bridge core, highest core):**
 ```c
-/* write one byte, then make it visible before the "ready" flag */
+/* write one byte, make it visible, set the "ready" flag, then fire the
+   virtual IRQ so the OS's ISR for that device reads the byte */
 virtual_ps2_write_data(byte);
 mfence();
 virtual_ps2_set_status(VIRTUAL_PS2_STAT_KBD);   /* or _MOUSE */
+virtual_ps2_send_irq(VIRTUAL_PS2_IRQ_KBD);      /* or _MOUSE */
 ```
 
-**Consumer (OS PS/2 driver, core 0):**
+**Consumer (OS PS/2 driver, core 0) — ISR-driven:**
 ```c
-/* poll the status register; when a bit is set, read the data byte and
-   READ-AND-CLEAR the status bit (a pure load does NOT clear it, unlike the
-   real 8042 hardware) */
-if (status & VIRTUAL_PS2_STAT_KBD) {
-    byte = virtual_ps2_read_data();
-    virtual_ps2_clear_status(VIRTUAL_PS2_STAT_KBD);
-    /* feed byte to the OS's keyboard handler */
-}
+/* In the OS's keyboard ISR (vector 0x21) / mouse ISR (vector 0x2C), which the
+   bridge's virtual IRQ triggers: read the data byte, READ-AND-CLEAR the status
+   bit (a pure load does NOT clear it, unlike the real 8042 hardware), feed the
+   byte to the OS's existing handler, then EOI the local APIC. */
+byte = virtual_ps2_read_data();
+virtual_ps2_clear_status(VIRTUAL_PS2_STAT_KBD);   /* or _MOUSE */
+/* feed byte to the OS's keyboard/mouse handler */
+adapter_apic_eoi();   /* see below */
 ```
 
 **Byte stream semantics (virtual PS/2) — the "serial keyboard/mouse interface":**
@@ -275,22 +291,39 @@ byte with `STAT_KBD` set and a mouse byte with `STAT_MOUSE` set.
 **Ordering (cross-core):** The bridge (core N) and the OS (core 0) are on different
 cores. x86 is cache-coherent (MESI), so the shared region is coherent. The `mfence` on
 the producer (before setting the status bit) ensures the data byte is visible before the
-"ready" flag. No interrupts, no locks.
+"ready" flag. The virtual IRQ is sent only after the status bit is set, so when the OS's
+ISR fires the data is already visible. No locks.
 
-**The honest minimal OS change (read-and-clear):** on the real 8042, reading the data
-port (0x60) automatically clears the output-buffer-full status bit. A pure load from
-`VIRTUAL_PS2_DATA` does **not** clear it. So the OS's data read must be a **read-and-
+**The virtual IRQ (the ISR-driven path):** The reference OS (TempleOS) drives
+keyboard/mouse input **primarily from ISRs** — `IRQKbd` (0x21) and `IRQMsHard` (0x2C)
+read the data port; the polled path (`KbdMsHndlr`) is only a fallback gated on
+`!irqs_working`. To use that ISR path on a USB-only machine, the bridge delivers a
+**virtual interrupt**: after writing a byte and setting the status bit, it sends an
+inter-processor interrupt (IPI) via the local APIC ICR to the OS core on the **same
+vector** the OS already uses for that device. The OS's existing ISR fires and reads the
+virtual data port. This is exactly the reference OS's own software-IPI primitive
+(`MPInt`), reused by the bridge.
+
+**The one OS-side accommodation (APIC EOI):** a real 8042 IRQ is **PIC-sourced**, so the
+OS's ISRs EOI the 8259 PIC (`OutU8(0x20,0x20)`). A virtual IRQ is **APIC-sourced** (an
+IPI), so the ISR must **also EOI the local APIC** (write 0 to the LAPIC EOI register).
+This is a one-line addition per ISR — smaller than suppressing the IRQ path and using
+the polled fallback, and faithful to the OS's actual ISR-driven architecture.
+
+**The honest minimal OS change (read-and-clear + APIC EOI):** on the real 8042, reading
+the data port (0x60) automatically clears the output-buffer-full status bit. A pure load
+from `VIRTUAL_PS2_DATA` does **not** clear it. So the OS's data read must be a **read-and-
 clear** — load the byte, then clear the status bit. This is 2 lines per data-read site,
-not 1. It is the absolute-minimum OS change and reuses 100% of the OS's existing
+plus the one-line APIC EOI in the ISR. It reuses 100% of the OS's existing
 decoder/parser/PutKey logic.
 
 **ABI stability rules (what makes it OS-independent):**
-1. The region layout, register offsets, status bits, and byte-stream format are **fixed**
-   and documented here. They do not change per OS.
-2. The bridge never assumes anything about the OS — it only writes bytes and sets status
-   bits.
-3. The OS never assumes anything about the bridge — it only reads status/data and clears
-   status bits.
+1. The region layout, register offsets, status bits, byte-stream format, and IRQ vectors
+   are **fixed** and documented here. They do not change per OS.
+2. The bridge never assumes anything about the OS — it only writes bytes, sets status
+   bits, and sends the virtual IRQ.
+3. The OS never assumes anything about the bridge — it only reads status/data, clears
+   status bits, and EOIs the APIC.
 4. The region base address is published by the boot-time UEFI app (a fixed physical
    address, `0x10000030`). Each OS reads it once at startup.
 
@@ -302,28 +335,31 @@ decoder/parser/PutKey logic.
 
 | Module | Responsibility | Relative size |
 |--------|----------------|---------------|
-| **B1. XHCI periodic-IN driver** | Drive the XHCI controller directly (XHCI ≥ 1.0 only, per C6): doorbell, TRB rings, event ring, periodic interrupt IN transfers on the two pre-discovered **low/full-speed** endpoints. No SuperSpeed support, no enumeration, no hotplug, no interrupts | Largest (~300–600 LOC) |
+| **B1. XHCI periodic-IN driver** | Drive the XHCI controller directly (XHCI ≥ 1.0 only, per C6): doorbell, TRB rings, event ring, periodic interrupt IN transfers on the two pre-discovered **low/full-speed** endpoints. No SuperSpeed support, no enumeration, no hotplug, no hardware interrupts consumed (the bridge polls; it is an interrupt *producer*, not consumer) | Largest (~300–600 LOC) |
 | **B2. HID report parser** | Parse boot-protocol keyboard (8-byte report) and mouse (3-byte report) reports | Small |
 | **B3. HID → PS/2 Set 1 translator** | Usage → Set 1 scancode table (make/break), mouse buttons/dx/dy → PS/2 packet | Small |
-| **B4. Virtual 8042 port writer** | 8042-style producer: write one byte to the virtual data register, set the status bit, `mfence` ordering. One byte in flight at a time | Tiny |
+| **B4. Virtual 8042 port writer + IRQ emitter** | 8042-style producer: write one byte to the virtual data register, set the status bit, `mfence` ordering, then send the virtual IRQ (IPI) on the device's vector so the OS's ISR fires. One byte in flight at a time | Tiny |
 | **B5. Bridge core entry** | Bridge core entry point and TDM poll loop; runs in its own time slot on the highest core, sharing with the OS's background task | Tiny |
 
-### 7.2 Input side — the OS's PS/2 driver reads the virtual port (NOT an OS source modification)
+### 7.2 Input side — the OS's PS/2 driver reads the virtual port from its ISRs (NOT an OS source modification)
 
 The input-side change is a **small edit to the OS's PS/2 driver**, not a new component.
 The OS's existing scancode/mouse-packet decoder and input queue are reused **unchanged**;
 only the low-level byte source changes from the real 8042 ports (`0x60`/`0x64`) to the
-virtual port region. The OS source is otherwise untouched.
+virtual port region, and the OS's existing keyboard/mouse ISRs (triggered by the
+bridge's virtual IRQ) do the read. The OS source is otherwise untouched.
 
 | Module | Responsibility | OS-specific? | Relative size |
 |--------|----------------|--------------|---------------|
-| **O1. Virtual port reader** | Read the virtual status/data registers, read-and-clear the status bit, feed bytes to the OS's existing KBD/mouse handler | **Yes** (per-OS) | Tiny |
+| **O1. Virtual port reader (ISR-driven)** | In the OS's keyboard/mouse ISR (triggered by the bridge's virtual IRQ): read the virtual status/data registers, read-and-clear the status bit, feed bytes to the OS's existing KBD/mouse handler, then EOI the local APIC | **Yes** (per-OS) | Tiny |
 
 > **How O1 hooks in without editing source:** the OS's PS/2 driver already reads the
-> 8042 ports and feeds its own input queue. Replacing `in 0x60`/`in 0x64` with loads
-> from the virtual port region (plus a read-and-clear of the status bit) reuses that
-> path entirely. This is a minimal, well-scoped edit to the OS's PS/2 driver — the
-> absolute-minimum OS change.
+> 8042 ports from its ISRs and feeds its own input queue. Replacing `in 0x60`/`in 0x64`
+> with loads from the virtual port region (plus a read-and-clear of the status bit and a
+> one-line APIC EOI) reuses that path entirely. The bridge's virtual IRQ triggers the
+> OS's existing ISR, so the ISR-driven path works without the real 8042 producing IRQs.
+> This is a minimal, well-scoped edit to the OS's PS/2 driver — the absolute-minimum OS
+> change.
 
 ### 7.3 Boot-time (UEFI application) — OS-independent
 
@@ -354,9 +390,9 @@ sequenceDiagram
     loop forever (parallel)
         CN->>CN: Poll XHCI periodic IN
         CN->>CN: Translate HID to PS/2
-        CN->>C0: Write virtual 8042 port
+        CN->>C0: Write virtual 8042 port + send virtual IRQ (IPI)
         CN->>CN: OS background task runs
-        C0->>C0: OS PS/2 driver reads virtual port
+        C0->>C0: OS kbd/mouse ISR reads virtual port, EOIs APIC
     end
 ```
 
@@ -373,6 +409,7 @@ sequenceDiagram
 | Secure Boot blocks UEFI app | Sign the app or enroll a key (deployment concern, not architectural) |
 | Target lacks XHCI ≥ 1.0 | **Hard requirement (C6):** only XHCI ≥ 1.0 is supported. Verify the controller's spec version (XHCI `HCSPARAMS1`/`HCCPARAMS`, or the UEFI `EFI_USB2_HC_PROTOCOL` revision) at boot; abort cleanly if not XHCI ≥ 1.0. No EHCI/UHCI/OHCI fallback |
 | Cross-core ordering bugs in virtual port | `mfence` producer before setting the status bit; single byte in flight; unit-test on host |
+| OS ISR does not EOI the local APIC | The virtual IRQ is APIC-sourced (an IPI), so the OS's ISR must EOI the local APIC (write 0 to the LAPIC EOI register) in addition to the PIC EOI it already does. This is a one-line addition per ISR (§6, §9.1) |
 | OS independence not preserved | The bridge + virtual port ABI are OS-agnostic (§3, §6). Only the OS's PS/2 driver read is per-OS. To load a new OS, adapt its PS/2 driver to read the virtual port — never touch the bridge or ABI. Verify the ABI is stable and versioned |
 | OS data read does not clear the status bit | The OS's data read must be a **read-and-clear** (load the byte, then clear the status bit). A pure load does not clear it, unlike the real 8042. This is the honest minimal OS change (§6) |
 
@@ -393,9 +430,21 @@ reference consumer of the virtual 8042 port ABI:
   `KbdCmdFlush()`, `MsHardPktRead()` all read `InU8(KBD_PORT)`; `KbdMsHndlr()` polls
   `InU8(KBD_CTRL)&1` then drains. This confirms the virtual port must use a **single
   data slot** with status bits, not separate kbd/mouse slots.
-- **Polled path — CONFIRMED.** TempleOS has a **polled** path (`KbdMsHndlr`) that checks
-  the status register and drains data — so the polled virtual-status approach works
-  **without interrupts**. (The IRQ path would need synthetic IPIs, which are not used.)
+- **ISR-driven path is PRIMARY — CONFIRMED.** TempleOS drives keyboard/mouse input
+  **primarily from ISRs**: `IRQKbd` (vector 0x21 / IRQ1) and `IRQMsHard` (vector 0x2C /
+  IRQ12) read the data port. The polled path (`KbdMsHndlr`) is only a **fallback** gated
+  on `!irqs_working`. So the design delivers a **virtual IRQ** (an IPI via the local
+  APIC ICR) on those same vectors to trigger the OS's existing ISRs — not the polled
+  fallback.
+- **Virtual IRQ mechanism — CONFIRMED.** TempleOS's own software-IPI primitive
+  `MPInt(U8 num, I64 cpu_num)` writes the local APIC ICR (`ICR_HIGH = mp_apic_ids[cpu]<<24`,
+  `ICR_LOW = 0x4000+num`) to deliver an interrupt to a specific core. The bridge reuses
+  this exact mechanism to deliver the virtual IRQ to core 0 on the device's vector.
+- **APIC EOI accommodation — REQUIRED.** A real 8042 IRQ is **PIC-sourced**, so
+  `IRQKbd`/`IRQMsHard` EOI the 8259 PIC (`OutU8(0x20,0x20)`). A virtual IRQ is
+  **APIC-sourced** (an IPI), so the ISR must **also EOI the local APIC** (write 0 to the
+  LAPIC EOI register, as `IntNop()`/`IRQ_TIMER` do). This is a one-line addition per ISR
+  — the honest, minimal OS-side accommodation for the virtual IRQ design.
 - **Read-and-clear — REQUIRED.** On the real 8042, reading the data port clears the
   output-buffer-full status bit. A pure load from the virtual data slot does **not**
   clear it, so the OS's data read must be a **read-and-clear** (load the byte, then
@@ -417,9 +466,10 @@ hardware is the source of truth. The OS boot is the last, optional step; most of
 design is proven before it.
 
 **Layer 0 — Host unit tests (no QEMU, no OS):**
-- Virtual 8042 port writer: single-byte write + status bit, keyboard priority, blocked-
-  while-pending, consumption handshake, and the B2→B3→B4 pipeline for a key and a mouse
-  move. Run as pure C on the host (`tests/test_virtual_ps2.c`).
+- Virtual 8042 port writer + IRQ emitter: single-byte write + status bit, virtual IRQ
+  sent after write on the device's vector, keyboard priority, blocked-while-pending,
+  consumption handshake, and the B2→B3→B4 pipeline for a key and a mouse move. Run as
+  pure C on the host (`tests/test_virtual_ps2.c`).
 - HID → PS/2 Set 1 translator: usage → scancode table, make/break, `0xE0` extended
   codes, mouse buttons/dx/dy → 3-byte packet. Run as pure C on the host.
 - These cover B2, B3, B4 logic entirely — no hardware, no OS.
@@ -506,12 +556,12 @@ primary test vehicle.
 | B1 XHCI periodic-IN driver | Firmware Coder |
 | B2 HID report parser | Firmware Coder |
 | B3 HID → PS/2 Set 1 translator | Firmware Coder |
-| B4 Virtual 8042 port writer (cross-core) | Firmware Coder |
+| B4 Virtual 8042 port writer + IRQ emitter (cross-core) | Firmware Coder |
 | B5 Bridge core entry / poll loop | Firmware Coder |
 | U1 USB topology discovery | Firmware Coder |
 | U2 Highest-core bring-up (SIPI/GDT/stack/page tables) | Firmware Coder |
 | U3 Memory reservation | Firmware Coder |
-| O1 Virtual port reader (per-OS PS/2 driver read) | Firmware Coder |
+| O1 Virtual port reader (per-OS PS/2 driver read, ISR-driven + APIC EOI) | Firmware Coder |
 | O1 reader for a second OS (portability demo) | Firmware Coder |
 | GNU-EFI Makefile, linker script, PE32+ | Builder |
 | Validate interface matches spec (§6) | Architect |

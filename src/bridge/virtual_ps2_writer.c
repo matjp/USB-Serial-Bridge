@@ -1,10 +1,11 @@
 /*
- * virtual_ps2_writer.c - B4: 8042-style producer.
+ * virtual_ps2_writer.c - B4: 8042-style producer + virtual IRQ emitter.
  *
  * Writes the translated PS/2 byte streams into the virtual 8042 port region
  * (see include/virtual_ps2.h). This is the bridge-side half of the "virtual
- * ports" design: the OS reads the virtual status/data registers directly, so
- * no per-OS mailbox adapter is needed.
+ * IRQ + virtual ports" design: the OS reads the virtual status/data registers
+ * from its existing keyboard/mouse ISRs, which are triggered by the virtual
+ * interrupt the bridge sends here.
  *
  * Faithful 8042 semantics:
  *   - ONE byte in flight at a time (single data register, mirrors the 8042's
@@ -14,8 +15,18 @@
  *   - The producer writes the data byte, then mfence(), then sets the status
  *     bit, so the data is visible before the "ready" flag.
  *
+ * Virtual IRQ:
+ *   - After the data byte is written and the status bit is set, the bridge
+ *     sends a virtual interrupt (an IPI via the local APIC ICR) to the OS
+ *     core on the vector the OS already uses for that device (0x21 keyboard,
+ *     0x2C mouse). The OS's existing ISR fires and reads the virtual data
+ *     port. This is what makes the OS's ISR-driven input path work without
+ *     the real 8042 producing IRQs.
+ *
  * The OS side must READ-AND-CLEAR the status bit when it reads the data byte
- * (a pure load does not clear it, unlike the real 8042 hardware).
+ * (a pure load does not clear it, unlike the real 8042 hardware), and must
+ * EOI the local APIC in its ISR (the virtual IRQ is APIC-sourced, not
+ * PIC-sourced).
  */
 
 #include <efi.h>
@@ -61,11 +72,15 @@ bridge_write_virtual_ps2(void)
         g_vp_kbd_idx++;
         __asm__ __volatile__("mfence" ::: "memory");
         virtual_ps2_set_status(VIRTUAL_PS2_STAT_KBD);
+        /* Virtual IRQ: fire the OS's keyboard ISR so it reads the byte. */
+        virtual_ps2_send_irq(VIRTUAL_PS2_IRQ_KBD);
     } else if (g_vp_mouse_idx < g_ps2_mouse_stream.count) {
         virtual_ps2_write_data(g_ps2_mouse_stream.bytes[g_vp_mouse_idx]);
         g_vp_mouse_idx++;
         __asm__ __volatile__("mfence" ::: "memory");
         virtual_ps2_set_status(VIRTUAL_PS2_STAT_MOUSE);
+        /* Virtual IRQ: fire the OS's mouse ISR so it reads the byte. */
+        virtual_ps2_send_irq(VIRTUAL_PS2_IRQ_MOUSE);
     }
 
 done:

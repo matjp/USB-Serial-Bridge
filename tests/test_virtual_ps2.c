@@ -35,6 +35,8 @@ extern BOOLEAN g_mouse_valid;
 static UINT8 g_mock_status;
 static UINT8 g_mock_data;
 static int   g_write_count;   /* number of data writes performed */
+static int   g_irq_count;     /* number of virtual IRQs sent */
+static UINT8 g_last_irq;      /* vector of the last virtual IRQ sent */
 
 /* Strong overrides of the weak accessors in virtual_ps2_writer.c. */
 UINT8
@@ -54,6 +56,13 @@ void
 virtual_ps2_set_status(UINT8 bits)
 {
     g_mock_status |= bits;
+}
+
+void
+virtual_ps2_send_irq(UINT8 vector)
+{
+    g_irq_count++;
+    g_last_irq = vector;
 }
 
 /* ------------------------------------------------------------------ */
@@ -94,6 +103,8 @@ reset_virtual_state(void)
     g_mock_status  = 0;
     g_mock_data    = 0;
     g_write_count  = 0;
+    g_irq_count    = 0;
+    g_last_irq     = 0;
     g_ps2_kbd_stream.count   = 0;
     g_ps2_mouse_stream.count = 0;
     bridge_virtual_ps2_reset();
@@ -118,6 +129,8 @@ test_single_kbd_byte(void)
     CHECK_EQ_U8(g_mock_data, 0x1C, "data register holds 0x1C");
     CHECK_EQ_U8(g_mock_status, VIRTUAL_PS2_STAT_KBD, "kbd status bit set");
     CHECK(g_write_count == 1, "exactly one data write");
+    CHECK(g_irq_count == 1, "virtual IRQ sent after write");
+    CHECK_EQ_U8(g_last_irq, VIRTUAL_PS2_IRQ_KBD, "IRQ on kbd vector 0x21");
     CHECK(g_ps2_kbd_stream.count == 0, "kbd stream consumed");
 }
 
@@ -136,6 +149,8 @@ test_single_mouse_byte(void)
     CHECK_EQ_U8(g_mock_data, 0x01, "data register holds 0x01");
     CHECK_EQ_U8(g_mock_status, VIRTUAL_PS2_STAT_MOUSE, "mouse status bit set");
     CHECK(g_write_count == 1, "exactly one data write");
+    CHECK(g_irq_count == 1, "virtual IRQ sent after write");
+    CHECK_EQ_U8(g_last_irq, VIRTUAL_PS2_IRQ_MOUSE, "IRQ on mouse vector 0x2C");
     CHECK(g_ps2_mouse_stream.count == 0, "mouse stream consumed");
 }
 
@@ -156,6 +171,8 @@ test_kbd_priority(void)
     CHECK_EQ_U8(g_mock_data, 0x1C, "kbd byte written first");
     CHECK_EQ_U8(g_mock_status, VIRTUAL_PS2_STAT_KBD, "kbd status bit set");
     CHECK(g_write_count == 1, "only one byte written (single output buffer)");
+    CHECK(g_irq_count == 1, "one IRQ sent (for the kbd byte)");
+    CHECK_EQ_U8(g_last_irq, VIRTUAL_PS2_IRQ_KBD, "IRQ on kbd vector 0x21");
 }
 
 /* If a byte is still pending (status bit set), do NOT write another. */
@@ -172,6 +189,7 @@ test_blocked_when_pending(void)
     bridge_write_virtual_ps2();
 
     CHECK(g_write_count == 0, "no data write while pending");
+    CHECK(g_irq_count == 0, "no IRQ sent while pending");
     CHECK_EQ_U8(g_mock_status, VIRTUAL_PS2_STAT_KBD, "status unchanged");
     CHECK(g_ps2_kbd_stream.count == 0, "stream still consumed (regenerated each poll)");
 }
@@ -265,6 +283,33 @@ test_pipeline_mouse(void)
     CHECK(g_write_count == 3, "three mouse bytes written");
 }
 
+/* The virtual IRQ is sent AFTER the data byte is written and the status bit
+ * is set, on the device's vector. This is what triggers the OS's ISR. */
+static void
+test_virtual_irq_sent(void)
+{
+    printf("\n[Test 8] virtual IRQ sent after write on device vector\n");
+
+    reset_virtual_state();
+    g_ps2_kbd_stream.bytes[0] = 0x1C;
+    g_ps2_kbd_stream.count    = 1;
+
+    bridge_write_virtual_ps2();
+
+    CHECK(g_write_count == 1, "data byte written");
+    CHECK_EQ_U8(g_mock_status, VIRTUAL_PS2_STAT_KBD, "status bit set");
+    CHECK(g_irq_count == 1, "virtual IRQ sent");
+    CHECK_EQ_U8(g_last_irq, VIRTUAL_PS2_IRQ_KBD, "IRQ on kbd vector 0x21");
+
+    /* A second byte (after the OS consumes) sends a second IRQ. */
+    g_mock_status = 0;
+    g_ps2_kbd_stream.bytes[0] = 0x9C;
+    g_ps2_kbd_stream.count    = 1;
+    bridge_write_virtual_ps2();
+    CHECK(g_irq_count == 2, "second byte sends a second IRQ");
+    CHECK_EQ_U8(g_last_irq, VIRTUAL_PS2_IRQ_KBD, "second IRQ on kbd vector");
+}
+
 /* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
@@ -281,6 +326,7 @@ main(void)
     test_consumption_handshake();
     test_pipeline_key();
     test_pipeline_mouse();
+    test_virtual_irq_sent();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
