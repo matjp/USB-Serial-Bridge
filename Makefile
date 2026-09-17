@@ -26,33 +26,12 @@ CRT0            := gnuefi/crt0-efi-$(ARCH).o
 CC              := gcc
 LD              := ld
 OBJCOPY         := objcopy
-NM              := nm
-PATCH_EFI       := python3 tools/patch_efi.py
 
-# Alpine's binutils does not ship the `efi-app-x86_64` objcopy target, so
-# objcopy silently falls back to `pei-x86-64` and emits a PE image with an
-# EMPTY optional header (Magic=0, Subsystem=0, EntryPoint=0). UEFI firmware
-# rejects such an image (the P50 showed no output and fell through to the next
-# boot device). tools/patch_efi.py inserts a correct PE32+ optional header and
-# fixes the section headers so the image passes the EDK2 PE loader validation.
-# The entry point RVA is read from the `_start` symbol in the ELF .so.
-#
-# On distros whose binutils DOES ship the efi-app-x86_64 target (e.g. Ubuntu,
-# used by the GitHub Actions CI), objcopy already emits a valid PE32+ image, so
-# the patch step is skipped automatically (see efi_needs_patch below).
-define efi_entry_rva
-	$(shell $(NM) $1 2>/dev/null | awk '$$3=="_start"{print "0x"$$1}')
-endef
-
-# Return "yes" if the objcopy output lacks a valid PE32+ optional header and
-# therefore needs patching. Alpine's binutils (no efi-app-x86_64 target) emits
-# a PE with SizeOfOptionalHeader==0, so the section table starts immediately
-# after the 20-byte COFF header. A proper UEFI image has a non-zero optional
-# header (PE32+ Magic 0x20B). Reads e_lfanew at file offset 0x3C, then the
-# COFF SizeOfOptionalHeader at e_lfanew+4+16.
-define efi_needs_patch
-	$(shell python3 -c "import struct,sys; d=open('$1','rb').read(); e=struct.unpack_from('<I',d,0x3C)[0]; o=struct.unpack_from('<H',d,e+4+16)[0] if e+24<=len(d) else 0; sys.exit(0 if o>0 else 1)" 2>/dev/null && echo no || echo yes)
-endef
+# We build on GitHub Actions (Ubuntu), whose binutils ships the
+# `efi-app-x86_64` objcopy target. objcopy therefore emits a valid PE32+ UEFI
+# image directly from the linked .so - no post-processing is needed. (The
+# local Alpine container lacks that target and would need tools/patch_efi.py,
+# but we do not build locally.)
 
 # --- Compiler flags ---------------------------------------------------------
 # -ffreestanding: no hosted runtime assumptions
@@ -119,11 +98,6 @@ build/$(TARGET).efi: build/$(TARGET).so
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym \
 		-j .rel -j .rela -j .rel.* -j .rela.* -j .reloc \
 		--target=efi-app-$(ARCH) --subsystem=10 $< $@
-	@if [ "$(strip $(call efi_needs_patch,$@))" = "yes" ]; then \
-		$(PATCH_EFI) $@ $@ $(call efi_entry_rva,$<); \
-	else \
-		echo "objcopy produced a valid PE32+ image; skipping patch"; \
-	fi
 
 # --- Debug build ------------------------------------------------------------
 # Produces build/bridge-debug.efi with -DBRIDGE_DEBUG. The bridge records the
@@ -145,11 +119,6 @@ build-debug/$(DEBUG_TARGET).efi: build-debug/$(DEBUG_TARGET).so
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym \
 		-j .rel -j .rela -j .rel.* -j .rela.* -j .reloc \
 		--target=efi-app-$(ARCH) --subsystem=10 $< $@
-	@if [ "$(strip $(call efi_needs_patch,$@))" = "yes" ]; then \
-		$(PATCH_EFI) $@ $@ $(call efi_entry_rva,$<); \
-	else \
-		echo "objcopy produced a valid PE32+ image; skipping patch"; \
-	fi
 
 debug: build-debug/$(DEBUG_TARGET).efi
 
