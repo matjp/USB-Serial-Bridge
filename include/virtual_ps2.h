@@ -95,10 +95,26 @@
 /* ------------------------------------------------------------------ */
 /* Weak accessors.                                                     */
 /*                                                                     */
-/* The bridge writes to the fixed addresses above and sends the virtual */
-/* IRQ. On the host these are unmapped, so the host test overrides these */
-/* weak functions with a mock register file (same pattern as            */
-/* xhci_read32/xhci_write32 in xhci.c).                                 */
+/* The bridge (producer) writes to the fixed addresses above and sends  */
+/* the virtual IRQ; the OS's ISR-driven reader (O1, the consumer) reads */
+/* the status/data registers and clears the status bit. On the host     */
+/* these are unmapped, so the host test overrides these weak functions  */
+/* with a mock register file (same pattern as xhci_read32/xhci_write32  */
+/* in xhci.c).                                                          */
+/*                                                                     */
+/* Producer-side accessors (used by the bridge):                       */
+/*   - virtual_ps2_read_status()  - read the status register            */
+/*   - virtual_ps2_write_data()   - write one data byte                 */
+/*   - virtual_ps2_set_status()   - set status bits (OR)                */
+/*   - virtual_ps2_send_irq()     - deliver the virtual IRQ (IPI)       */
+/*                                                                     */
+/* Consumer-side accessors (used by the OS's ISR-driven reader, O1):   */
+/*   - virtual_ps2_read_data()    - read the data byte                  */
+/*   - virtual_ps2_clear_status() - clear status bits (AND-NOT)         */
+/*                                                                     */
+/* The consumer's data read is a READ-AND-CLEAR: a pure load from       */
+/* VIRTUAL_PS2_DATA does NOT clear the status bit (unlike the real      */
+/* 8042), so the OS must load the byte and then clear the status bit.   */
 /* ------------------------------------------------------------------ */
 
 /* Read the virtual status register. */
@@ -114,5 +130,16 @@ __attribute__((weak)) void virtual_ps2_set_status(UINT8 bits);
  * Called by the bridge AFTER the data byte is written and the status bit
  * is set, so the OS's ISR for that vector fires and reads the data. */
 __attribute__((weak)) void virtual_ps2_send_irq(UINT8 vector);
+
+/* Read the data byte from the virtual data register (consumer side).
+ * Called by the OS's ISR-driven reader (O1) after it sees a pending
+ * status bit. A pure load does NOT clear the status bit, so the reader
+ * must also call virtual_ps2_clear_status() (read-and-clear). */
+__attribute__((weak)) UINT8 virtual_ps2_read_data(void);
+
+/* Clear the given status bits (AND-NOT into the status register).
+ * This is the READ-AND-CLEAR the OS must do when it consumes a data
+ * byte: load the byte, then clear the status bit. */
+__attribute__((weak)) void virtual_ps2_clear_status(UINT8 bits);
 
 #endif /* VIRTUAL_PS2_H */

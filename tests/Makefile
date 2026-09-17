@@ -57,9 +57,15 @@ TARGET_XF := build/test_xhci_fault
 # overrides the weak accessors. Hardware-independent.
 TARGET_VP := build/test_virtual_ps2
 
+# --- Layer 2 stub harness: exercises O1 (src/adapter/virtual_ps2_reader.c),
+# the consumer-side virtual port reader, against a stub that mimics the OS's
+# PS/2 driver (a fake PutKey/KBD buffer). Validates read-and-clear behavior
+# without the real OS. Hardware-independent.
+TARGET_L2 := build/test_layer2_reader
+
 .PHONY: all run clean
 
-all: $(TARGET) $(TARGET_L1F) $(TARGET_XF) $(TARGET_VP)
+all: $(TARGET) $(TARGET_L1F) $(TARGET_XF) $(TARGET_VP) $(TARGET_L2)
 
 $(TARGET): $(OBJS) build/test_layer0.o
 	$(CC) $(CFLAGS) -o $@ $^
@@ -71,6 +77,9 @@ $(TARGET_XF): build/xhci.o build/test_xhci_fault.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TARGET_VP): build/bridge/virtual_ps2_writer.o build/bridge/hid_parser.o build/bridge/hid_ps2.o build/b1_stub.o build/test_virtual_ps2.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET_L2): build/adapter/virtual_ps2_reader.o build/test_layer2_reader.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 build/%.o: ../src/%.c
@@ -97,6 +106,10 @@ build/test_virtual_ps2.o: test_virtual_ps2.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+build/test_layer2_reader.o: test_layer2_reader.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 # xhci.c is the real B1 driver. On the host it is compiled with the mock
 # register-file overrides from test_xhci_fault.c (weak symbols).
 build/xhci.o: ../src/bridge/xhci.c
@@ -108,6 +121,7 @@ run: all
 	./$(TARGET_L1F)
 	./$(TARGET_XF)
 	./$(TARGET_VP)
+	./$(TARGET_L2)
 
 clean:
 	rm -rf build

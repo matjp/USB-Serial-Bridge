@@ -66,7 +66,11 @@ BRIDGE_SRCS     := src/bridge/xhci.c \
                    src/bridge/bridge_entry.c \
                    src/bridge/tdm.c
 
-SRCS            := $(APP_SRCS) $(BRIDGE_SRCS)
+# Input adapter code (O1): the consumer-side virtual port reader, loaded
+# into the reserved region on core 0 (see docs/architecture.md section 7.2).
+ADAPTER_SRCS    := src/adapter/virtual_ps2_reader.c
+
+SRCS            := $(APP_SRCS) $(BRIDGE_SRCS) $(ADAPTER_SRCS)
 OBJS            := $(SRCS:src/%.c=build/%.o)
 
 # --- Rules ------------------------------------------------------------------
