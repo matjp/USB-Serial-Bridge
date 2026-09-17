@@ -131,6 +131,22 @@ uefi_reserve_memory(void)
     if (EFI_ERROR(status))
         return status;
 
+    /* Zero the reserved page. AllocatePages does NOT zero memory, and the
+     * pointer slots in this page (USB_TOPOLOGY_PTR_ADDR 0x10000008,
+     * XHCI_FAULT_PTR_ADDR 0x10000018, XHCI_STATUS_PTR_ADDR 0x10000020) are
+     * read by the Layer 1 harness (xhci_fault_lookup/xhci_status_lookup)
+     * BEFORE the bridge publishes them. On real hardware the page can hold
+     * stale garbage, so a lookup can return a non-NULL garbage pointer and
+     * dereferencing it (fault->magic) page-faults and hangs the app. Zeroing
+     * the page makes the lookups return NULL cleanly until the bridge
+     * publishes. */
+    {
+        volatile UINT8 *p = (volatile UINT8 *)(UINTN)vp_addr;
+        UINTN j;
+        for (j = 0; j < 0x1000; j++)
+            p[j] = 0;
+    }
+
     /* 2. Allocate + reserve the bridge code region (high-placed). */
     status = allocate_reserved_pages_high(BRIDGE_REGION_PAGES, &bridge_addr);
     if (EFI_ERROR(status))

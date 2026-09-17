@@ -167,7 +167,11 @@ print_bridge_status(void)
 void
 uefi_check_bridge_fault(void)
 {
-    XHCI_FAULT *fault = wait_for_bridge_fault();
+    XHCI_FAULT *fault;
+
+    Print(L"BRIDGE-DBG: check_fault: waiting for bridge fault record\n");
+    fault = wait_for_bridge_fault();
+    Print(L"BRIDGE-DBG: check_fault: wait done, fault=%p\n", fault);
 
     if (fault == NULL) {
 #ifdef BRIDGE_DEBUG
