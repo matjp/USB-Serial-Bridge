@@ -1,0 +1,66 @@
+# Build the USB HID -> Virtual 8042 Port Bridge UEFI firmware on GitHub Actions.
+#
+# Why CI instead of the local Alpine container:
+#   Alpine's binutils does not ship the `efi-app-x86_64` objcopy target, so the
+#   local build relies on tools/patch_efi.py to insert a PE32+ optional header
+#   by hand (a fragile workaround). Ubuntu's binutils DOES ship that target, so
+#   `objcopy --target=efi-app-x86_64` produces a correct UEFI image directly.
+#   The Makefile detects this (efi_needs_patch) and skips the patch step, so the
+#   same Makefile works both here and locally.
+#
+# Artifacts:
+#   bridge-efi       -> build/bridge.efi            (normal, silent on success)
+#   bridge-debug-efi -> build-debug/bridge-debug.efi (prints XHCI state on bring-up)
+#   bootable         -> build/bootable/EFI/BOOT/BOOTX64.EFI (staged for a FAT32 USB stick)
+
+name: Build UEFI firmware
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # allow manual trigger from the Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gnu-efi binutils gcc make python3
+
+      - name: Build firmware (normal + debug)
+        run: |
+          make build/bridge.efi
+          make build-debug/bridge-debug.efi
+
+      - name: Run host unit tests (Layer 0)
+        run: make test
+
+      - name: Stage bootable image
+        run: make bootable DEBUG=0
+
+      - name: Upload normal EFI
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-efi
+          path: build/bridge.efi
+          if-no-files-found: error
+
+      - name: Upload debug EFI
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-debug-efi
+          path: build-debug/bridge-debug.efi
+          if-no-files-found: error
+
+      - name: Upload bootable tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootable
+          path: build/bootable/
+          if-no-files-found: error
