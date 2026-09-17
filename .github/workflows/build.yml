@@ -100,6 +100,34 @@ jobs:
           mmd -i /tmp/bridge.img ::/EFI/BOOT
           mcopy -i /tmp/bridge.img efi/bridge-debug.efi ::/EFI/BOOT/BOOTX64.EFI
 
+      # Verify the disk image actually contains the artifact before we boot it.
+      # This catches two classes of silent failure that would otherwise look
+      # identical to a firmware bug:
+      #   1. The artifact download produced a file with a different name/path
+      #      than `efi/bridge-debug.efi`, so mcopy copied nothing (or the wrong
+      #      file) and the disk has no BOOTX64.EFI -> OVMF "Not Found".
+      #   2. The artifact is not a valid PE32+ EFI application (subsystem 10),
+      #      so even if it is on the disk OVMF cannot load it.
+      - name: Verify disk image contains a valid EFI app
+        run: |
+          echo "=== Downloaded artifact tree ==="
+          find efi -type f -exec ls -la {} \;
+          echo "=== Disk image directory listing ==="
+          mdir -i /tmp/bridge.img ::/EFI/BOOT/
+          echo "=== Check BOOTX64.EFI is present on the disk ==="
+          if ! mdir -i /tmp/bridge.img ::/EFI/BOOT/ | grep -qi "BOOTX64"; then
+            echo "ERROR: BOOTX64.EFI not found on disk image"
+            exit 1
+          fi
+          echo "=== Extract BOOTX64.EFI from the disk and inspect it ==="
+          mcopy -i /tmp/bridge.img ::/EFI/BOOT/BOOTX64.EFI /tmp/BOOTX64.EFI
+          ls -la /tmp/BOOTX64.EFI
+          file /tmp/BOOTX64.EFI || true
+          echo "=== PE subsystem check (must be 10 = EFI application) ==="
+          objdump -p /tmp/BOOTX64.EFI 2>/dev/null | grep -iE "Subsystem|Magic|SizeOfOptionalHeader" || true
+          echo "=== Compare on-disk file to the downloaded artifact ==="
+          cmp /tmp/BOOTX64.EFI efi/bridge-debug.efi && echo "MATCH: on-disk BOOTX64.EFI is byte-identical to the artifact" || echo "DIFFER: on-disk BOOTX64.EFI differs from the artifact"
+
       - name: Boot in OVMF and check for success
         run: |
           # The ovmf package names its firmware files differently across Ubuntu
