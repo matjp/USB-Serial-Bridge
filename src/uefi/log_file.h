@@ -7,6 +7,13 @@
  * that can be read back on a PC, instead of relying on screen-scraping a
  * scrolling console.
  *
+ * DEBUG-ONLY: this module is compiled in ONLY for the debug build
+ * (-DBRIDGE_DEBUG). In the normal build the functions compile to no-ops, so
+ * the release image never touches the boot volume.
+ *
+ * OVERWRITE: each boot deletes any existing bridge-debug.log and creates a
+ * fresh one, so the file always reflects exactly the current run.
+ *
  * Usage:
  *   - Call uefi_log_init(image) as the FIRST thing after InitializeLib() in
  *     efi_main, so every subsequent Print() is captured.
