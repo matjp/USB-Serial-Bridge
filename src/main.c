@@ -92,6 +92,16 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     /* Flush the debug log to disk before handing off. */
     uefi_log_flush();
 
-    /* 5. Hand off to the bootloader / OS on the BSP (core 0). */
-    return EFI_SUCCESS;
+    /* 5. Hand off to the bootloader / OS on the BSP (core 0).
+     *
+     * We do NOT return EFI_SUCCESS here. Returning would make the firmware's
+     * boot manager continue to the next boot option; with no OS on the drive
+     * (as in the OVMF CI test) OVMF would reboot and re-run this app in a
+     * loop, flooding the log with repeated boots. Instead we halt the BSP so
+     * the app runs exactly once. The bridge core (AP) keeps running its own
+     * poll loop independently. When a real OS/bootloader is added later, this
+     * halt is replaced by the actual handoff (e.g. ExitBootServices + jump). */
+    for (;;) {
+        uefi_call_wrapper(BS->Stall, 1, 10000000);   /* 10 s per iteration */
+    }
 }
