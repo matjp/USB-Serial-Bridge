@@ -156,11 +156,17 @@ typedef struct {
     EP_CONTEXT   ep_in;
 } DEVICE_CONTEXT;
 
-/* Transfer ring (a small ring of Normal TRBs). */
-#define TR_RING_SIZE 4
+/* Transfer ring (a small ring of Normal TRBs).
+ *
+ * Each ring holds a single Normal TRB pointing at the endpoint's report
+ * buffer. A periodic IN endpoint needs only one transfer in flight at a
+ * time: after each completed transfer the software re-arms the TRB (flips
+ * its cycle bit back to the producer's cycle) and rings the doorbell again.
+ * A single TRB avoids the ring-wrap cycle-bit bookkeeping entirely. */
+#define TR_RING_SIZE 1
 typedef struct {
     TRB    trbs[TR_RING_SIZE];
-    UINT32 enq;    /* enqueue index */
+    UINT32 enq;    /* enqueue index (always 0 for a single-TRB ring) */
     UINT32 cycle;  /* current cycle bit */
 } TRANSFER_RING;
 
@@ -615,6 +621,26 @@ xhci_ring_endpoint_doorbell(XHCI *xhci, UINT8 endpoint, UINT32 slot)
     xhci_write32(&xhci->doorbell[slot], db_target);
 }
 
+/* Re-arm a transfer ring after a completed transfer and ring the doorbell
+ * to start the next periodic IN transfer.
+ *
+ * In XHCI, after the controller consumes a Normal TRB on a periodic IN
+ * endpoint it toggles the TRB's cycle bit (returning ownership to software)
+ * and posts a Transfer Event. The software must flip the cycle bit back to
+ * the producer's cycle and ring the doorbell again, or the endpoint stops
+ * transferring after the first report. Each ring holds a single TRB (all
+ * TRBs point at the same report buffer), so re-arming is just flipping the
+ * one TRB's cycle bit back. */
+static void
+xhci_rearm_transfer(XHCI *xhci, TRANSFER_RING *tr, UINT8 endpoint, UINT32 slot)
+{
+    /* Flip the consumed TRB's cycle bit back to the producer's cycle. */
+    tr->trbs[tr->enq].field3 ^= (1u << 0);
+
+    /* Ring the doorbell to start the next transfer. */
+    xhci_ring_endpoint_doorbell(xhci, endpoint, slot);
+}
+
 /* Poll the event ring for a Transfer Event. Returns TRUE and fills *out
  * with the event TRB if one is ready. */
 static BOOLEAN
@@ -741,11 +767,19 @@ bridge_poll_usb(void)
             g_raw_kbd.key[4]   = g_kbd_buf[6];
             g_raw_kbd.key[5]   = g_kbd_buf[7];
             g_kbd_valid = TRUE;
+
+            /* Re-arm the transfer ring and ring the doorbell so the next
+             * periodic IN transfer is scheduled. */
+            xhci_rearm_transfer(&xhci, &g_tr_kbd, topo->kbd.endpoint, 1);
         } else if (trb_ptr == (UINT64)(UINTN)g_tr_mouse.trbs) {
             g_raw_mouse.buttons = g_mouse_buf[0];
             g_raw_mouse.dx      = (INT8)g_mouse_buf[1];
             g_raw_mouse.dy      = (INT8)g_mouse_buf[2];
             g_mouse_valid = TRUE;
+
+            /* Re-arm the transfer ring and ring the doorbell so the next
+             * periodic IN transfer is scheduled. */
+            xhci_rearm_transfer(&xhci, &g_tr_mouse, topo->mouse.endpoint, 2);
         }
     }
 }
