@@ -253,43 +253,38 @@ uefi_log_init(EFI_HANDLE image)
     g_root = root;
 
     /* 5. Open (or create) the log file. This also proves the volume is
-     *    actually writable. NOTE: EFI_FILE_MODE_CREATE only creates the file
-     *    if it does not already exist; it does NOT truncate an existing file.
-     *    So we explicitly truncate below (step 5b) to guarantee each boot
-     *    starts with a fresh, empty log rather than leaving stale tail bytes
-     *    from a previous, longer run. */
+     *    actually writable.
+     *
+     *    To guarantee each boot starts with a fresh, empty log we use the
+     *    delete-then-recreate approach: if a previous run's file exists,
+     *    delete it, then create a brand-new one. This is the most reliable
+     *    way to overwrite an existing log across real FAT drivers.
+     *
+     *    (EFI_FILE_MODE_CREATE alone does NOT truncate an existing file, and
+     *    truncating via SetInfo(FileSize=0) proved unreliable on real
+     *    hardware - it could leave the file empty/gone without a usable new
+     *    file. Delete+recreate avoids that entirely.) */
+    status = uefi_call_wrapper(root->Open, 5, root, &g_log_file,
+                               L"\\bridge-debug.log",
+                               EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE,
+                               0);
+    if (!EFI_ERROR(status) && g_log_file != NULL) {
+        /* A previous run's log exists: delete it. Delete() also closes the
+         * handle, so we must not use g_log_file afterwards. */
+        uefi_call_wrapper(g_log_file->Delete, 1, g_log_file);
+        g_log_file = NULL;
+    }
+
+    /* Create a fresh log file. */
     status = uefi_call_wrapper(root->Open, 5, root, &g_log_file,
                                L"\\bridge-debug.log",
                                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
                                    EFI_FILE_MODE_CREATE,
                                0);
     if (EFI_ERROR(status) || g_log_file == NULL) {
-        Print(L"BRIDGE-DBG: log_init: open bridge-debug.log failed (%r)\n",
+        Print(L"BRIDGE-DBG: log_init: create bridge-debug.log failed (%r)\n",
               status);
         return EFI_UNSUPPORTED;
-    }
-
-    /* 5b. Truncate the file to zero length so a previous run's log does not
-     *     linger. SetInfo with EFI_FILE_INFO and FileSize=0 resizes the file
-     *     to empty; the file position is then reset to 0 for the first write.
-     *     This is the only reliable way to overwrite an existing log in UEFI
-     *     (EFI_FILE_MODE_CREATE alone does not truncate). */
-    {
-        EFI_FILE_INFO file_info;
-        UINTN info_size = SIZE_OF_EFI_FILE_INFO;
-
-        /* Zero the struct so all fields (times, attributes, ...) are valid
-         * defaults; only FileSize matters for truncation. */
-        uefi_call_wrapper(BS->SetMem, 3, &file_info, sizeof(file_info), 0);
-        file_info.FileSize = 0;
-
-        status = uefi_call_wrapper(g_log_file->SetInfo, 4, g_log_file,
-                                   &gEfiFileInfoGuid, info_size, &file_info);
-        if (EFI_ERROR(status)) {
-            Print(L"BRIDGE-DBG: log_init: truncate bridge-debug.log failed "
-                  L"(%r)\n", status);
-            return EFI_UNSUPPORTED;
-        }
     }
 
     /* 6. Best-effort removable-media diagnostic. Not a hard gate: the USB
