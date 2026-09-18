@@ -92,6 +92,26 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     /* Flush the debug log to disk before handing off. */
     uefi_log_flush();
 
+    /* Wait for a keypress so the user can read the boxed log flush verdict
+     * above. This is deterministic and does not depend on the firmware's
+     * display-blank behavior: the screen stays on because we are waiting for
+     * input, and the user presses a key when they are done reading. */
+    Print(L"\nPRESS A KEY to CONTINUE...\n");
+    {
+        EFI_INPUT_KEY key;
+        EFI_STATUS ks;
+
+        for (;;) {
+            /* Poll for a key. ReadKeyStroke returns EFI_NOT_READY when no
+             * key is pending; we just keep polling. */
+            ks = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 1, ST->ConIn,
+                                   &key);
+            if (!EFI_ERROR(ks))
+                break;
+            uefi_call_wrapper(BS->Stall, 1, 100000);   /* 0.1 s */
+        }
+    }
+
     /* 5. Hand off to the bootloader / OS on the BSP (core 0).
      *
      * We do NOT return EFI_SUCCESS here. Returning would make the firmware's
@@ -100,22 +120,8 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
      * loop, flooding the log with repeated boots. Instead we halt the BSP so
      * the app runs exactly once. The bridge core (AP) keeps running its own
      * poll loop independently. When a real OS/bootloader is added later, this
-     * halt is replaced by the actual handoff (e.g. ExitBootServices + jump).
-     *
-     * The firmware blanks the display after a short idle timeout, which is
-     * why the screen goes blank even though we stall. A long stall alone does
-     * NOT prevent this. To keep the screen on long enough to read the log
-     * flush verdict, we periodically write to the console: any console output
-     * resets the firmware's display-blank timer. We print a heartbeat line
-     * every few seconds so the display stays awake and the user can read the
-     * boxed flush-status verdict above. */
+     * halt is replaced by the actual handoff (e.g. ExitBootServices + jump). */
     for (;;) {
-        /* Use \r (carriage return, no newline) so the heartbeat overwrites
-         * in place on a single line and does NOT scroll the boxed flush
-         * verdict (printed above) off the top of the screen. The console
-         * activity resets the firmware's display-blank timer, keeping the
-         * screen on so the verdict stays readable. */
-        Print(L"\rBRIDGE-DBG: halted - log flush verdict above (keep-alive)");
-        uefi_call_wrapper(BS->Stall, 1, 5000000);   /* 5 s per iteration */
+        uefi_call_wrapper(BS->Stall, 1, 10000000);   /* 10 s per iteration */
     }
 }
