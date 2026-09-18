@@ -195,13 +195,18 @@ jobs:
           # The robust log writer should have created bridge-debug.log on the
           # USB drive (it only activates on a removable USB boot drive). Verify
           # it was actually written - this proves the log writer activated and
-          # the volume was writable.
+          # the volume was writable. This is a hard check: if the log is
+          # missing, the USB-boot test has not exercised the log writer, so the
+          # workflow fails.
           echo "=== Checking bridge-debug.log was written to the USB drive ==="
           mdir -i /tmp/bridge.img ::/ || true
           if mdir -i /tmp/bridge.img ::/ | grep -qi "bridge-debug.log"; then
             echo "LOG WRITER OK: bridge-debug.log present on the USB drive"
             echo "--- bridge-debug.log contents ---"
             mtype -i /tmp/bridge.img ::/bridge-debug.log || true
+            echo "--- end of bridge-debug.log ---"
           else
-            echo "LOG WRITER WARNING: bridge-debug.log not found on the USB drive"
+            echo "LOG WRITER FAILED: bridge-debug.log not found on the USB drive"
+            echo "The log writer did not activate or did not write the file."
+            exit 1
           fi
