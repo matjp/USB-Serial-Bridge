@@ -267,10 +267,11 @@ uefi_install_exception_handler(EFI_HANDLE image)
             status = uefi_call_wrapper(
                 cpu->RegisterInterruptHandler, 3,
                 cpu, vectors[i], exception_handler);
-            if (EFI_ERROR(status)) {
-                Print(L"BRIDGE-DBG: exception trap: vector %d register "
-                      L"failed (%r)\n", vectors[i], status);
-            }
+            /* Ignore per-vector registration failures: on many platforms the
+             * vectors are already handled by the firmware, so
+             * RegisterInterruptHandler returns EFI_ALREADY_STARTED. That is
+             * expected and not worth logging. */
+            (void)status;
         }
     }
 

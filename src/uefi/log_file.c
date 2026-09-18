@@ -337,7 +337,6 @@ uefi_log_init(EFI_HANDLE image)
         (EFI_TEXT_OUTPUT_STRING)wrapper_output_string;
     ST->ConOut = &g_console_wrapper;
 
-    Print(L"BRIDGE-DBG: log_init: log writer active on boot volume\n");
     return EFI_SUCCESS;
 }
 
