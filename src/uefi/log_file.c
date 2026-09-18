@@ -159,34 +159,51 @@ uefi_log_init(EFI_HANDLE image)
     status = uefi_call_wrapper(BS->HandleProtocol, 3, image,
                                &gEfiLoadedImageProtocolGuid,
                                (VOID **)&loaded);
-    if (EFI_ERROR(status) || loaded == NULL || loaded->DeviceHandle == NULL)
+    if (EFI_ERROR(status) || loaded == NULL || loaded->DeviceHandle == NULL) {
+        Print(L"BRIDGE-DBG: log_init: no LoadedImage/DeviceHandle (%r)\n",
+              status);
         return EFI_UNSUPPORTED;
+    }
 
     /* 2. Verify the boot device is a USB drive (device-path check). */
     status = uefi_call_wrapper(BS->HandleProtocol, 3, loaded->DeviceHandle,
                                &gEfiDevicePathProtocolGuid,
                                (VOID **)&devpath);
-    if (EFI_ERROR(status) || devpath == NULL || !path_is_usb(devpath))
+    if (EFI_ERROR(status) || devpath == NULL || !path_is_usb(devpath)) {
+        Print(L"BRIDGE-DBG: log_init: boot device is not USB (%r)\n", status);
         return EFI_UNSUPPORTED;
+    }
 
     /* 3. Verify it is removable media (block I/O check). */
     status = uefi_call_wrapper(BS->HandleProtocol, 3, loaded->DeviceHandle,
                                &gEfiBlockIoProtocolGuid, (VOID **)&blockio);
     if (EFI_ERROR(status) || blockio == NULL || blockio->Media == NULL ||
-        !blockio->Media->RemovableMedia)
+        !blockio->Media->RemovableMedia) {
+        Print(L"BRIDGE-DBG: log_init: boot device not removable media "
+              L"(status=%r blockio=%p media=%p removable=%d)\n",
+              status, blockio,
+              blockio != NULL ? blockio->Media : NULL,
+              (blockio != NULL && blockio->Media != NULL)
+                  ? (int)blockio->Media->RemovableMedia
+                  : -1);
         return EFI_UNSUPPORTED;
+    }
 
     /* 4. Open the file system on the boot device. */
     status = uefi_call_wrapper(BS->HandleProtocol, 3, loaded->DeviceHandle,
                                &gEfiSimpleFileSystemProtocolGuid,
                                (VOID **)&sfs);
-    if (EFI_ERROR(status) || sfs == NULL)
+    if (EFI_ERROR(status) || sfs == NULL) {
+        Print(L"BRIDGE-DBG: log_init: no SimpleFileSystem (%r)\n", status);
         return EFI_UNSUPPORTED;
+    }
 
     /* 5. Get the root directory of the volume. */
     status = uefi_call_wrapper(sfs->OpenVolume, 1, sfs, &root);
-    if (EFI_ERROR(status) || root == NULL)
+    if (EFI_ERROR(status) || root == NULL) {
+        Print(L"BRIDGE-DBG: log_init: OpenVolume failed (%r)\n", status);
         return EFI_UNSUPPORTED;
+    }
 
     /* 6. Open (or create) the log file. CREATE opens at position 0, so each
      *    boot overwrites the previous run's log. This also proves the volume
@@ -196,8 +213,11 @@ uefi_log_init(EFI_HANDLE image)
                                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
                                    EFI_FILE_MODE_CREATE,
                                0);
-    if (EFI_ERROR(status) || g_log_file == NULL)
+    if (EFI_ERROR(status) || g_log_file == NULL) {
+        Print(L"BRIDGE-DBG: log_init: open bridge-debug.log failed (%r)\n",
+              status);
         return EFI_UNSUPPORTED;
+    }
 
     /* 7. Install the console wrapper. Copy the whole real struct so every
      *    other operation (SetAttribute, ClearScreen, Mode, ...) still works,
@@ -206,6 +226,7 @@ uefi_log_init(EFI_HANDLE image)
     g_console_wrapper.OutputString = wrapper_output_string;
     ST->ConOut = &g_console_wrapper;
 
+    Print(L"BRIDGE-DBG: log_init: log writer active on boot volume\n");
     return EFI_SUCCESS;
 }
 
