@@ -155,6 +155,18 @@ jobs:
           # Print() output is captured. The debug build pauses on a keypress
           # after printing BRIDGE OK, so we let it run to the timeout and grep
           # the captured log.
+          # Boot the EFI app from a USB drive (not IDE). This is required so
+          # the robust log-file writer (src/uefi/log_file.c) can activate: it
+          # only enables itself when the boot device is verified to be a
+          # removable USB drive AND it is the same drive the app was booted
+          # from. Booting from IDE would make the log writer a silent no-op.
+          #
+          # The disk image is attached as a USB mass-storage device:
+          #   -drive if=none,id=usbstick,... + -device usb-storage,drive=usbstick
+          # The usb-storage device is a USB Mass Storage Class device that
+          # OVMF's USB stack enumerates as a removable USB drive, so the
+          # device-path (MSG_USB_DP) and BlockIo RemovableMedia checks pass.
+          # qemu-xhci provides the XHCI >= 1.0 controller the bridge requires.
           timeout 45 qemu-system-x86_64 \
             -machine q35,accel=tcg \
             -cpu max \
@@ -162,8 +174,9 @@ jobs:
             -m 512M \
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
             -drive if=pflash,format=raw,file=/tmp/ovmf_vars.fd \
-            -drive file=/tmp/bridge.img,format=raw,if=ide,index=0 \
+            -drive if=none,id=usbstick,format=raw,file=/tmp/bridge.img \
             -device qemu-xhci \
+            -device usb-storage,drive=usbstick \
             -device usb-kbd \
             -device usb-mouse \
             -nographic \
@@ -173,10 +186,22 @@ jobs:
           echo "=== Checking for XHCI bring-up success ==="
           if grep -q "BRIDGE OK: XHCI bring-up succeeded" /tmp/ovmf.log; then
             echo "OVMF TEST PASSED: bridge brought up XHCI"
-            exit 0
           else
             echo "OVMF TEST FAILED: XHCI bring-up success not reported"
             echo "--- failure signals ---"
             grep -iE "BRIDGE FAULT|ERROR:|#GP|#PF|Exception|panic|Unsupported" /tmp/ovmf.log || true
             exit 1
+          fi
+          # The robust log writer should have created bridge-debug.log on the
+          # USB drive (it only activates on a removable USB boot drive). Verify
+          # it was actually written - this proves the log writer activated and
+          # the volume was writable.
+          echo "=== Checking bridge-debug.log was written to the USB drive ==="
+          mdir -i /tmp/bridge.img ::/ || true
+          if mdir -i /tmp/bridge.img ::/ | grep -qi "bridge-debug.log"; then
+            echo "LOG WRITER OK: bridge-debug.log present on the USB drive"
+            echo "--- bridge-debug.log contents ---"
+            mtype -i /tmp/bridge.img ::/bridge-debug.log || true
+          else
+            echo "LOG WRITER WARNING: bridge-debug.log not found on the USB drive"
           fi

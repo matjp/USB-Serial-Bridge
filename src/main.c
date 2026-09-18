@@ -16,6 +16,7 @@
 
 #include "uefi/uefi.h"
 #include "uefi/exception_handler.h"
+#include "uefi/log_file.h"
 
 EFI_STATUS
 EFIAPI
@@ -28,6 +29,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
      * the SystemTable globals before this dereferences null/garbage and
      * crashes (#UD). */
     InitializeLib(image, systab);
+
+    /* Open bridge-debug.log on the boot volume (robust edition). This only
+     * activates when the boot device is verified to be a removable USB drive
+     * AND it is the same drive the app was booted from; otherwise it is a
+     * no-op and the app continues with console-only output. */
+    uefi_log_init(image);
 
     /* Install the CPU exception trap (debug aid) so a fault inside the app
      * prints a register dump + stack trace and halts, instead of dying in
@@ -81,6 +88,9 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     Print(L"BRIDGE-DBG: uefi_check_bridge_fault returned\n");
 
     Print(L"Bridge setup complete. Handing off to OS on core 0.\n");
+
+    /* Flush the debug log to disk before handing off. */
+    uefi_log_flush();
 
     /* 5. Hand off to the bootloader / OS on the BSP (core 0). */
     return EFI_SUCCESS;
