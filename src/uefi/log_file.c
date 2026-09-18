@@ -99,6 +99,22 @@ path_is_usb(EFI_DEVICE_PATH *path)
 /* Log file writing.                                                   */
 /* ------------------------------------------------------------------ */
 
+/* Last write/flush status, recorded so uefi_log_flush() (called from
+ * main.c, outside the wrapper) can report it via Print() without
+ * recursing. */
+static EFI_STATUS g_last_log_status = EFI_SUCCESS;
+
+/* Write a fixed diagnostic string DIRECTLY to the real console, bypassing
+ * the wrapper. Used to report log-write failures without recursing into
+ * the wrapper (which would re-enter log_write_string). */
+static void
+log_diag(const CHAR16 *msg)
+{
+    if (g_real_conout != NULL)
+        uefi_call_wrapper(g_real_conout->OutputString, 2, g_real_conout,
+                          (CHAR16 *)msg);
+}
+
 /* Append a NUL-terminated CHAR16 string to the log file, then flush it to
  * disk. Flushing after every write is deliberate: if the app later hangs or
  * faults (e.g. on real hardware), the log content up to that point is already
@@ -111,8 +127,10 @@ log_write_string(const CHAR16 *str)
     UINTN size;
     EFI_STATUS status;
 
-    if (g_log_file == NULL || str == NULL)
+    if (g_log_file == NULL || str == NULL) {
+        g_last_log_status = EFI_NOT_READY;
         return EFI_NOT_READY;
+    }
 
     while (str[len] != 0)
         len++;
@@ -123,11 +141,20 @@ log_write_string(const CHAR16 *str)
 
     status = uefi_call_wrapper(g_log_file->Write, 3, g_log_file, &size,
                                (VOID *)str);
-    if (EFI_ERROR(status))
+    g_last_log_status = status;
+    if (EFI_ERROR(status)) {
+        /* Report the failure to the real console so we can see why the log
+         * file stays empty on real hardware. */
+        log_diag(L"\r\n[LOG] write failed\r\n");
         return status;
+    }
 
     /* Force the write to disk so a later hang/crash does not lose it. */
-    return uefi_call_wrapper(g_log_file->Flush, 1, g_log_file);
+    status = uefi_call_wrapper(g_log_file->Flush, 1, g_log_file);
+    g_last_log_status = status;
+    if (EFI_ERROR(status))
+        log_diag(L"\r\n[LOG] flush failed\r\n");
+    return status;
 }
 
 /*
@@ -263,6 +290,20 @@ uefi_log_init(EFI_HANDLE image)
 void
 uefi_log_flush(void)
 {
-    if (g_log_file != NULL)
-        uefi_call_wrapper(g_log_file->Flush, 1, g_log_file);
+    EFI_STATUS status;
+    EFI_STATUS last_write;
+
+    if (g_log_file == NULL)
+        return;
+
+    /* Capture the last write status before the flush overwrites it. */
+    last_write = g_last_log_status;
+
+    status = uefi_call_wrapper(g_log_file->Flush, 1, g_log_file);
+    g_last_log_status = status;
+
+    /* Report the last write/flush status. This runs from main.c (outside
+     * the wrapper), so Print() is safe here. */
+    Print(L"BRIDGE-DBG: log flush status=%r (last write=%r)\n", status,
+          last_write);
 }
