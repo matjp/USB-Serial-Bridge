@@ -100,8 +100,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
      * loop, flooding the log with repeated boots. Instead we halt the BSP so
      * the app runs exactly once. The bridge core (AP) keeps running its own
      * poll loop independently. When a real OS/bootloader is added later, this
-     * halt is replaced by the actual handoff (e.g. ExitBootServices + jump). */
+     * halt is replaced by the actual handoff (e.g. ExitBootServices + jump).
+     *
+     * The stall is deliberately LONG (60 s per iteration) so the final
+     * diagnostic lines stay on screen long enough to read before the display
+     * powers off / the screen blanks. The messages scroll by too fast to
+     * catch during normal execution, so this pause is what lets the user see
+     * the log flush status and any [LOG] write/flush failure markers. */
     for (;;) {
-        uefi_call_wrapper(BS->Stall, 1, 10000000);   /* 10 s per iteration */
+        uefi_call_wrapper(BS->Stall, 1, 60000000);   /* 60 s per iteration */
     }
 }

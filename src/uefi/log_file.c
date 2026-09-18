@@ -303,7 +303,17 @@ uefi_log_flush(void)
     g_last_log_status = status;
 
     /* Report the last write/flush status. This runs from main.c (outside
-     * the wrapper), so Print() is safe here. */
+     * the wrapper), so Print() is safe here. The line is prominent and the
+     * caller stalls for a long time afterwards so it stays on screen long
+     * enough to read before the display blanks. */
+    Print(L"\n============================================\n");
     Print(L"BRIDGE-DBG: log flush status=%r (last write=%r)\n", status,
           last_write);
+    if (EFI_ERROR(last_write))
+        Print(L"BRIDGE-DBG: >>> last log WRITE FAILED - file is empty <<<\n");
+    else if (EFI_ERROR(status))
+        Print(L"BRIDGE-DBG: >>> last log FLUSH FAILED - not on disk <<<\n");
+    else
+        Print(L"BRIDGE-DBG: >>> log writes OK - file should have content <<<\n");
+    Print(L"============================================\n");
 }
