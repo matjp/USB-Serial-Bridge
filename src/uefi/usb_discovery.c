@@ -41,11 +41,18 @@ static EFI_PCI_IO_PROTOCOL *g_xhci_pci = NULL;
 /* ------------------------------------------------------------------ */
 
 /* Read a 32-bit PCI config register for the given bus/device/function via
- * the EFI_PCI_IO_PROTOCOL. Returns EFI_SUCCESS on success. */
+ * the EFI_PCI_IO_PROTOCOL. Returns EFI_SUCCESS on success.
+ *
+ * The firmware's Pci.Read is built with the MS x64 ABI, while this app is
+ * built with the SysV ABI (EFIAPI is empty). It MUST be invoked through
+ * uefi_call_wrapper so the arguments are marshalled into the correct
+ * registers; a direct call passes them in the wrong registers and can hang
+ * or fault on real firmware. */
 static EFI_STATUS
 pci_read_config32(EFI_PCI_IO_PROTOCOL *pci, UINT32 offset, UINT32 *value)
 {
-    return pci->Pci.Read(pci, EfiPciIoWidthUint32, offset, 1, value);
+    return uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint32,
+                             offset, 1, value);
 }
 
 /* ------------------------------------------------------------------ */

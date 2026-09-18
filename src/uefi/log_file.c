@@ -99,13 +99,17 @@ path_is_usb(EFI_DEVICE_PATH *path)
 /* Log file writing.                                                   */
 /* ------------------------------------------------------------------ */
 
-/* Append a NUL-terminated CHAR16 string to the log file.
- * Returns EFI_SUCCESS if written, EFI_NOT_READY if no file is open. */
+/* Append a NUL-terminated CHAR16 string to the log file, then flush it to
+ * disk. Flushing after every write is deliberate: if the app later hangs or
+ * faults (e.g. on real hardware), the log content up to that point is already
+ * on disk rather than stuck in the FAT driver's buffer. Returns EFI_SUCCESS
+ * if written, EFI_NOT_READY if no file is open. */
 static EFI_STATUS
 log_write_string(const CHAR16 *str)
 {
     UINTN len = 0;
     UINTN size;
+    EFI_STATUS status;
 
     if (g_log_file == NULL || str == NULL)
         return EFI_NOT_READY;
@@ -117,8 +121,13 @@ log_write_string(const CHAR16 *str)
     if (size == 0)
         return EFI_SUCCESS;
 
-    return uefi_call_wrapper(g_log_file->Write, 3, g_log_file, &size,
-                             (VOID *)str);
+    status = uefi_call_wrapper(g_log_file->Write, 3, g_log_file, &size,
+                               (VOID *)str);
+    if (EFI_ERROR(status))
+        return status;
+
+    /* Force the write to disk so a later hang/crash does not lose it. */
+    return uefi_call_wrapper(g_log_file->Flush, 1, g_log_file);
 }
 
 /*
