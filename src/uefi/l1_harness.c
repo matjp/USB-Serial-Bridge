@@ -105,24 +105,6 @@ print_fault(const XHCI_FAULT *f)
 }
 
 #ifdef BRIDGE_DEBUG
-/* Debug builds only: wait for the user to press a key so the on-screen
- * bring-up report can be photographed before the app proceeds or halts. */
-static void
-wait_for_key(void)
-{
-    EFI_INPUT_KEY key;
-    EFI_STATUS status;
-
-    Print(L"\nPRESS A KEY TO CONTINUE...\n");
-
-    /* Drain any pending keystrokes, then block until a fresh key is pressed. */
-    for (;;) {
-        status = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 1, ST->ConIn, &key);
-        if (!EFI_ERROR(status))
-            break;
-    }
-}
-
 /* Debug builds only: wait for the bridge to publish its success record and
  * print the actual XHCI hardware state. Called when the bridge is healthy
  * (no fault), so the state is available for downstream verification. */
@@ -156,9 +138,6 @@ print_bridge_status(void)
     Print(L"  Mouse : addr %d  ep 0x%02X  int %d  spd %d  pkt %d\n",
           st->mouse & 0xFF, (st->mouse >> 8) & 0xFF, (st->mouse >> 16) & 0xFF,
           (st->mouse >> 24) & 0xFF, st->mouse_max_packet);
-
-    /* Pause so the user can photograph the success report. */
-    wait_for_key();
 }
 #endif /* BRIDGE_DEBUG */
 
@@ -182,12 +161,6 @@ uefi_check_bridge_fault(void)
     }
 
     print_fault(fault);
-
-#ifdef BRIDGE_DEBUG
-    /* Debug builds: pause so the user can photograph the fault report
-     * before the BSP halts. */
-    wait_for_key();
-#endif
 
     /* Halt on the BSP so the diagnosis stays on screen. */
     for (;;)

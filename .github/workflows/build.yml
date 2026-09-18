@@ -157,9 +157,9 @@ jobs:
           # requirement); usb-kbd/usb-mouse attach to it and are enumerated by
           # OVMF's USB stack so U1 can discover them via EFI_USB_IO_PROTOCOL.
           # -nographic routes the UEFI console (ConOut) to stdio so the bridge's
-          # Print() output is captured. The debug build pauses on a keypress
-          # after printing BRIDGE OK, so we let it run to the timeout and grep
-          # the captured log.
+          # Print() output is captured. The debug build writes its diagnostics
+          # to the log file, so we let it run to the timeout and grep the
+          # captured log.
           # Boot the EFI app from a USB drive (not IDE). This is required so
           # the robust log-file writer (src/uefi/log_file.c) can activate: it
           # only enables itself when the boot device is verified to be a

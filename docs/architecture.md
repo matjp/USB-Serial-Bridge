@@ -633,10 +633,9 @@ Bridge setup complete. Handing off to OS on core 0.
    bridge publishes.
 
 **Not yet validated (expected, per §7.3):** the bridge core does not run yet (U2 is a
-scaffold), so there is no `BRIDGE OK: XHCI bring-up succeeded` marker and no
-`PRESS A KEY TO CONTINUE...` pause. Those appear only after the full AP bring-up
-(copy bridge code, AP GDT/page tables/stack, run `bridge_entry()` on the AP) is
-implemented.
+scaffold), so there is no `BRIDGE OK: XHCI bring-up succeeded` marker. That appears
+only after the full AP bring-up (copy bridge code, AP GDT/page tables/stack, run
+`bridge_entry()` on the AP) is implemented.
 
 ---
 

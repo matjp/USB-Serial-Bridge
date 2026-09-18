@@ -18,28 +18,6 @@
 #include "uefi/exception_handler.h"
 #include "uefi/log_file.h"
 
-/* Print "PRESS A KEY to CONTINUE..." and block until a key is pressed.
- * Used before halting so the user can read the on-screen diagnostics
- * (which scroll by too fast and would otherwise be lost when the display
- * blanks). Polls ST->ConIn->ReadKeyStroke; the screen stays on because we
- * are actively waiting for input. */
-static void
-uefi_wait_for_key(void)
-{
-    EFI_INPUT_KEY key;
-    EFI_STATUS ks;
-
-    Print(L"\nPRESS A KEY to CONTINUE...\n");
-    for (;;) {
-        /* ReadKeyStroke returns EFI_NOT_READY when no key is pending; we
-         * just keep polling. */
-        ks = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 1, ST->ConIn, &key);
-        if (!EFI_ERROR(ks))
-            break;
-        uefi_call_wrapper(BS->Stall, 1, 100000);   /* 0.1 s */
-    }
-}
-
 EFI_STATUS
 EFIAPI
 efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
@@ -112,19 +90,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     Print(L"Bridge setup complete. Handing off to OS on core 0.\n");
 
 done:
-    /* Flush the debug log to disk, then wait for a keypress so the user can
-     * read the boxed log flush verdict (and any error message above). This
-     * runs on BOTH success and every error path, so the diagnostics are
-     * always readable before the display blanks. */
+    /* Flush the debug log to disk. This runs on BOTH success and every
+     * error path, so the diagnostics are always captured. */
     uefi_log_flush();
-    uefi_wait_for_key();
 
     /* Close the log file and flush the volume. This forces the FAT driver
      * to commit all buffered data to the physical disk - EFI_FILE->Flush
      * alone may only flush to the volume's cache on some drivers, which is
      * why the file stayed empty on the Toshiba despite writes reporting
-     * Success. Do this AFTER the keypress wait so the on-screen verdict is
-     * still readable. */
+     * Success. */
     uefi_log_close();
 
     /* 5. Hand off to the bootloader / OS on the BSP (core 0).
