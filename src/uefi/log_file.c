@@ -8,16 +8,19 @@
  *      the SAME drive the app was booted from.
  *   2. Verify the boot device is actually a USB drive by walking its
  *      EFI_DEVICE_PATH_PROTOCOL for a USB messaging node.
- *   3. Verify it is removable media via EFI_BLOCK_IO_PROTOCOL.Media->
- *      RemovableMedia.
- *   4. Verify it is writable by opening EFI_SIMPLE_FILE_SYSTEM_PROTOCOL,
+ *   3. Verify it is writable by opening EFI_SIMPLE_FILE_SYSTEM_PROTOCOL,
  *      OpenVolume, and opening (creating) L"\\bridge-debug.log" with
- *      READ|WRITE|CREATE.
- *   5. Only if ALL of the above succeed, copy the real ST->ConOut struct into
- *      a static wrapper, override ONLY OutputString, and repoint ST->ConOut at
- *      the wrapper. Every subsequent GNU-EFI Print() call goes through the
- *      wrapper, which mirrors the text to the real console AND appends it to
- *      the log file.
+ *      READ|WRITE|CREATE. This is the strongest proof the drive is usable.
+ *   4. Best-effort: report EFI_BLOCK_IO_PROTOCOL.Media->RemovableMedia for
+ *      diagnostics, but do NOT gate on it. On some platforms (and in QEMU's
+ *      usb-storage) the BlockIo Media pointer on the boot handle is not
+ *      reliable, and the USB device-path + writable-file checks already prove
+ *      this is a writable USB drive we booted from.
+ *   5. Only if ALL of the hard checks succeed, copy the real ST->ConOut struct
+ *      into a static wrapper, override ONLY OutputString, and repoint
+ *      ST->ConOut at the wrapper. Every subsequent GNU-EFI Print() call goes
+ *      through the wrapper, which mirrors the text to the real console AND
+ *      appends it to the log file.
  *
  * The wrapper's OutputString is marked __attribute__((ms_abi)) because the
  * firmware (OVMF) is built with the MS x64 ABI while this app is built with
@@ -174,22 +177,9 @@ uefi_log_init(EFI_HANDLE image)
         return EFI_UNSUPPORTED;
     }
 
-    /* 3. Verify it is removable media (block I/O check). */
-    status = uefi_call_wrapper(BS->HandleProtocol, 3, loaded->DeviceHandle,
-                               &gEfiBlockIoProtocolGuid, (VOID **)&blockio);
-    if (EFI_ERROR(status) || blockio == NULL || blockio->Media == NULL ||
-        !blockio->Media->RemovableMedia) {
-        Print(L"BRIDGE-DBG: log_init: boot device not removable media "
-              L"(status=%r blockio=%p media=%p removable=%d)\n",
-              status, blockio,
-              blockio != NULL ? blockio->Media : NULL,
-              (blockio != NULL && blockio->Media != NULL)
-                  ? (int)blockio->Media->RemovableMedia
-                  : -1);
-        return EFI_UNSUPPORTED;
-    }
-
-    /* 4. Open the file system on the boot device. */
+    /* 3. Open the file system on the boot device. This is the primary
+     *    writability gate: if we can open the volume and create a file, the
+     *    drive is genuinely usable. */
     status = uefi_call_wrapper(BS->HandleProtocol, 3, loaded->DeviceHandle,
                                &gEfiSimpleFileSystemProtocolGuid,
                                (VOID **)&sfs);
@@ -198,14 +188,14 @@ uefi_log_init(EFI_HANDLE image)
         return EFI_UNSUPPORTED;
     }
 
-    /* 5. Get the root directory of the volume. */
+    /* 4. Get the root directory of the volume. */
     status = uefi_call_wrapper(sfs->OpenVolume, 1, sfs, &root);
     if (EFI_ERROR(status) || root == NULL) {
         Print(L"BRIDGE-DBG: log_init: OpenVolume failed (%r)\n", status);
         return EFI_UNSUPPORTED;
     }
 
-    /* 6. Open (or create) the log file. CREATE opens at position 0, so each
+    /* 5. Open (or create) the log file. CREATE opens at position 0, so each
      *    boot overwrites the previous run's log. This also proves the volume
      *    is actually writable. */
     status = uefi_call_wrapper(root->Open, 5, root, &g_log_file,
@@ -217,6 +207,21 @@ uefi_log_init(EFI_HANDLE image)
         Print(L"BRIDGE-DBG: log_init: open bridge-debug.log failed (%r)\n",
               status);
         return EFI_UNSUPPORTED;
+    }
+
+    /* 6. Best-effort removable-media diagnostic. Not a hard gate: the USB
+     *    device-path check (step 2) plus the successful file create (step 5)
+     *    already prove this is a writable USB drive we booted from. On some
+     *    platforms/QEMU the BlockIo Media pointer on the boot handle is not
+     *    reliable, so we only report it. */
+    status = uefi_call_wrapper(BS->HandleProtocol, 3, loaded->DeviceHandle,
+                               &gEfiBlockIoProtocolGuid, (VOID **)&blockio);
+    if (EFI_ERROR(status) || blockio == NULL || blockio->Media == NULL) {
+        Print(L"BRIDGE-DBG: log_init: BlockIo unavailable (%r), "
+              L"continuing without removable check\n", status);
+    } else {
+        Print(L"BRIDGE-DBG: log_init: BlockIo RemovableMedia=%d\n",
+              (int)blockio->Media->RemovableMedia);
     }
 
     /* 7. Install the console wrapper. Copy the whole real struct so every
