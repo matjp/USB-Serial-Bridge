@@ -60,6 +60,11 @@
 /* The open log file handle, or NULL if logging is not active. */
 static EFI_FILE *g_log_file = NULL;
 
+/* The root directory handle of the boot volume, retained so uefi_log_close()
+ * can flush the whole volume (which forces the FAT driver to commit the log
+ * file's data to the physical disk). NULL if not open. */
+static EFI_FILE *g_root = NULL;
+
 /* The real console protocol, saved before we install the wrapper. */
 static SIMPLE_TEXT_OUTPUT_INTERFACE *g_real_conout = NULL;
 
@@ -237,12 +242,15 @@ uefi_log_init(EFI_HANDLE image)
         return EFI_UNSUPPORTED;
     }
 
-    /* 4. Get the root directory of the volume. */
+    /* 4. Get the root directory of the volume. Retain the handle so
+     *    uefi_log_close() can flush the whole volume (which forces the FAT
+     *    driver to commit the log file's data to the physical disk). */
     status = uefi_call_wrapper(sfs->OpenVolume, 1, sfs, &root);
     if (EFI_ERROR(status) || root == NULL) {
         Print(L"BRIDGE-DBG: log_init: OpenVolume failed (%r)\n", status);
         return EFI_UNSUPPORTED;
     }
+    g_root = root;
 
     /* 5. Open (or create) the log file. CREATE opens at position 0, so each
      *    boot overwrites the previous run's log. This also proves the volume
@@ -316,4 +324,33 @@ uefi_log_flush(void)
     else
         Print(L"BRIDGE-DBG: >>> log writes OK - file should have content <<<\n");
     Print(L"============================================\n");
+}
+
+/* Close the log file and flush the volume, forcing the FAT driver to commit
+ * all buffered data to the physical disk.
+ *
+ * WHY THIS IS NEEDED: on many UEFI FAT drivers, EFI_FILE->Flush() only
+ * flushes the file's data into the volume's internal cache; the data is not
+ * written to the physical media until the file is CLOSED (or the volume is
+ * flushed). Because the app halts (never returns from efi_main), the file
+ * was never closed, so the writes reported Success but the file stayed empty
+ * on disk. Closing the file (and flushing the volume) forces the commit.
+ *
+ * Safe to call any time; no-op if not open. After this, logging is disabled
+ * (the wrapper is left installed but writes become no-ops). */
+void
+uefi_log_close(void)
+{
+    if (g_log_file != NULL) {
+        uefi_call_wrapper(g_log_file->Flush, 1, g_log_file);
+        uefi_call_wrapper(g_log_file->Close, 1, g_log_file);
+        g_log_file = NULL;
+    }
+    if (g_root != NULL) {
+        /* Flush the volume so the directory entry + file data are committed
+         * to the physical disk. */
+        uefi_call_wrapper(g_root->Flush, 1, g_root);
+        uefi_call_wrapper(g_root->Close, 1, g_root);
+        g_root = NULL;
+    }
 }

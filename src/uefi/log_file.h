@@ -41,4 +41,11 @@ EFI_STATUS uefi_log_init(EFI_HANDLE image);
 /* Flush the log file to disk. Safe to call any time; no-op if not open. */
 void uefi_log_flush(void);
 
+/* Close the log file and flush the volume, forcing the FAT driver to commit
+ * all buffered data to the physical disk. Call this before halting so the
+ * log content actually reaches the USB drive (EFI_FILE->Flush alone may only
+ * flush to the volume's cache on some drivers). Safe to call any time; no-op
+ * if not open. */
+void uefi_log_close(void);
+
 #endif /* LOG_FILE_H */

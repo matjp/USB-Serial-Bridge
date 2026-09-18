@@ -119,6 +119,14 @@ done:
     uefi_log_flush();
     uefi_wait_for_key();
 
+    /* Close the log file and flush the volume. This forces the FAT driver
+     * to commit all buffered data to the physical disk - EFI_FILE->Flush
+     * alone may only flush to the volume's cache on some drivers, which is
+     * why the file stayed empty on the Toshiba despite writes reporting
+     * Success. Do this AFTER the keypress wait so the on-screen verdict is
+     * still readable. */
+    uefi_log_close();
+
     /* 5. Hand off to the bootloader / OS on the BSP (core 0).
      *
      * We do NOT return EFI_SUCCESS here. Returning would make the firmware's
