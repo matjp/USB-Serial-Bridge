@@ -102,12 +102,20 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
      * poll loop independently. When a real OS/bootloader is added later, this
      * halt is replaced by the actual handoff (e.g. ExitBootServices + jump).
      *
-     * The stall is deliberately LONG (60 s per iteration) so the final
-     * diagnostic lines stay on screen long enough to read before the display
-     * powers off / the screen blanks. The messages scroll by too fast to
-     * catch during normal execution, so this pause is what lets the user see
-     * the log flush status and any [LOG] write/flush failure markers. */
+     * The firmware blanks the display after a short idle timeout, which is
+     * why the screen goes blank even though we stall. A long stall alone does
+     * NOT prevent this. To keep the screen on long enough to read the log
+     * flush verdict, we periodically write to the console: any console output
+     * resets the firmware's display-blank timer. We print a heartbeat line
+     * every few seconds so the display stays awake and the user can read the
+     * boxed flush-status verdict above. */
     for (;;) {
-        uefi_call_wrapper(BS->Stall, 1, 60000000);   /* 60 s per iteration */
+        /* Use \r (carriage return, no newline) so the heartbeat overwrites
+         * in place on a single line and does NOT scroll the boxed flush
+         * verdict (printed above) off the top of the screen. The console
+         * activity resets the firmware's display-blank timer, keeping the
+         * screen on so the verdict stays readable. */
+        Print(L"\rBRIDGE-DBG: halted - log flush verdict above (keep-alive)");
+        uefi_call_wrapper(BS->Stall, 1, 5000000);   /* 5 s per iteration */
     }
 }
