@@ -29,13 +29,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
      * crashes (#UD). */
     InitializeLib(image, systab);
 
-#ifdef BRIDGE_DEBUG
     /* Install the file logger FIRST so every Print() below is captured to
      * bridge-debug.log on the boot volume. On failure we continue with
-     * console-only output. Debug build only - the release build never opens
-     * or writes to the boot volume. */
+     * console-only output. */
     uefi_log_init(image);
-#endif
 
     Print(L"BRIDGE-DBG: efi_main entered, InitializeLib done\n");
     Print(L"USB HID -> Virtual 8042 Port Bridge\n");
@@ -84,10 +81,8 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 
     Print(L"Bridge setup complete. Handing off to OS on core 0.\n");
 
-#ifdef BRIDGE_DEBUG
     /* Flush the debug log to disk before handing off. */
     uefi_log_flush();
-#endif
 
     /* 5. Hand off to the bootloader / OS on the BSP (core 0). */
     return EFI_SUCCESS;
