@@ -183,21 +183,13 @@ jobs:
             -serial mon:stdio > /tmp/ovmf.log 2>&1 || true
           echo "=== OVMF boot log ==="
           cat /tmp/ovmf.log
-          echo "=== Checking for XHCI bring-up success ==="
-          if grep -q "BRIDGE OK: XHCI bring-up succeeded" /tmp/ovmf.log; then
-            echo "OVMF TEST PASSED: bridge brought up XHCI"
-          else
-            echo "OVMF TEST FAILED: XHCI bring-up success not reported"
-            echo "--- failure signals ---"
-            grep -iE "BRIDGE FAULT|ERROR:|#GP|#PF|Exception|panic|Unsupported" /tmp/ovmf.log || true
-            exit 1
-          fi
-          # The robust log writer should have created bridge-debug.log on the
-          # USB drive (it only activates on a removable USB boot drive). Verify
-          # it was actually written - this proves the log writer activated and
-          # the volume was writable. This is a hard check: if the log is
-          # missing, the USB-boot test has not exercised the log writer, so the
-          # workflow fails.
+
+          # Verify the robust log writer created bridge-debug.log on the USB
+          # drive and read it back. This runs BEFORE the XHCI bring-up check so
+          # we always verify the log writer even if the (separate, known)
+          # bridge-core bring-up has not been implemented yet and the XHCI
+          # check fails. The log writer only activates on a removable USB boot
+          # drive, so its presence proves the USB-boot path exercised it.
           echo "=== Checking bridge-debug.log was written to the USB drive ==="
           mdir -i /tmp/bridge.img ::/ || true
           if mdir -i /tmp/bridge.img ::/ | grep -qi "bridge-debug.log"; then
@@ -208,5 +200,15 @@ jobs:
           else
             echo "LOG WRITER FAILED: bridge-debug.log not found on the USB drive"
             echo "The log writer did not activate or did not write the file."
+            exit 1
+          fi
+
+          echo "=== Checking for XHCI bring-up success ==="
+          if grep -q "BRIDGE OK: XHCI bring-up succeeded" /tmp/ovmf.log; then
+            echo "OVMF TEST PASSED: bridge brought up XHCI"
+          else
+            echo "OVMF TEST FAILED: XHCI bring-up success not reported"
+            echo "--- failure signals ---"
+            grep -iE "BRIDGE FAULT|ERROR:|#GP|#PF|Exception|panic|Unsupported" /tmp/ovmf.log || true
             exit 1
           fi
