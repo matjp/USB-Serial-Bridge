@@ -69,8 +69,16 @@ xhci_cap_read32(UINT64 mmio_base, UINT32 offset)
 {
     UINT32 value = 0;
     if (g_xhci_pci != NULL) {
-        g_xhci_pci->Mem.Read(g_xhci_pci, EfiPciIoWidthUint32, 0, offset, 1,
-                             &value);
+        /* The firmware's Mem.Read is built with the MS x64 ABI, while this
+         * app is built with the SysV ABI (EFIAPI is empty). It MUST be
+         * invoked through uefi_call_wrapper so the arguments are marshalled
+         * into the correct registers; a direct call passes them in the wrong
+         * registers and returns garbage (seen on real hardware: the XHCI
+         * HCIVERSION read came back wrong, so the >= 1.0 check failed and
+         * uefi_verify_xhci returned Unsupported). Mem.Read has 6 args
+         * including This. */
+        uefi_call_wrapper(g_xhci_pci->Mem.Read, 6, g_xhci_pci,
+                          EfiPciIoWidthUint32, 0, offset, 1, &value);
     } else {
         volatile UINT32 *reg = (volatile UINT32 *)(UINTN)(mmio_base + offset);
         value = *reg;
@@ -99,8 +107,11 @@ xhci_port_read32(UINT64 op_base, UINT32 port)
     UINT64 offset = (op_base - g_xhci_mmio_base) + XHCI_PORTSC_BASE +
                     (port - 1) * XHCI_PORTSC_STRIDE;
     if (g_xhci_pci != NULL) {
-        g_xhci_pci->Mem.Read(g_xhci_pci, EfiPciIoWidthUint32, 0, offset, 1,
-                             &value);
+        /* Same calling-convention requirement as xhci_cap_read32: the
+         * firmware's Mem.Read is MS ABI and must go through
+         * uefi_call_wrapper (6 args including This). */
+        uefi_call_wrapper(g_xhci_pci->Mem.Read, 6, g_xhci_pci,
+                          EfiPciIoWidthUint32, 0, offset, 1, &value);
     } else {
         volatile UINT32 *reg = (volatile UINT32 *)(UINTN)
             (op_base + XHCI_PORTSC_BASE + (port - 1) * XHCI_PORTSC_STRIDE);

@@ -18,6 +18,28 @@
 #include "uefi/exception_handler.h"
 #include "uefi/log_file.h"
 
+/* Print "PRESS A KEY to CONTINUE..." and block until a key is pressed.
+ * Used before halting so the user can read the on-screen diagnostics
+ * (which scroll by too fast and would otherwise be lost when the display
+ * blanks). Polls ST->ConIn->ReadKeyStroke; the screen stays on because we
+ * are actively waiting for input. */
+static void
+uefi_wait_for_key(void)
+{
+    EFI_INPUT_KEY key;
+    EFI_STATUS ks;
+
+    Print(L"\nPRESS A KEY to CONTINUE...\n");
+    for (;;) {
+        /* ReadKeyStroke returns EFI_NOT_READY when no key is pending; we
+         * just keep polling. */
+        ks = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 1, ST->ConIn, &key);
+        if (!EFI_ERROR(ks))
+            break;
+        uefi_call_wrapper(BS->Stall, 1, 100000);   /* 0.1 s */
+    }
+}
+
 EFI_STATUS
 EFIAPI
 efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
@@ -51,7 +73,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     Print(L"BRIDGE-DBG: uefi_verify_xhci returned %r\n", status);
     if (EFI_ERROR(status)) {
         Print(L"ERROR: no XHCI >= 1.0 controller found (status %r)\n", status);
-        return status;
+        goto done;
     }
 
     /* 2. Enumerate the single USB keyboard and mouse (U1). */
@@ -60,7 +82,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     Print(L"BRIDGE-DBG: uefi_discover_usb returned %r\n", status);
     if (EFI_ERROR(status)) {
         Print(L"ERROR: USB keyboard/mouse discovery failed (status %r)\n", status);
-        return status;
+        goto done;
     }
 
     /* 3. Allocate + reserve the bridge and virtual port regions (U3). */
@@ -69,7 +91,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     Print(L"BRIDGE-DBG: uefi_reserve_memory returned %r\n", status);
     if (EFI_ERROR(status)) {
         Print(L"ERROR: memory reservation failed (status %r)\n", status);
-        return status;
+        goto done;
     }
 
     /* 4. Bring up the highest core via SIPI, loading the bridge code (U2). */
@@ -78,7 +100,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     Print(L"BRIDGE-DBG: uefi_bringup_highest_core returned %r\n", status);
     if (EFI_ERROR(status)) {
         Print(L"ERROR: highest-core bring-up failed (status %r)\n", status);
-        return status;
+        goto done;
     }
 
     /* Layer 1 harness: if the bridge faulted during XHCI bring-up, print a
@@ -89,28 +111,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 
     Print(L"Bridge setup complete. Handing off to OS on core 0.\n");
 
-    /* Flush the debug log to disk before handing off. */
+done:
+    /* Flush the debug log to disk, then wait for a keypress so the user can
+     * read the boxed log flush verdict (and any error message above). This
+     * runs on BOTH success and every error path, so the diagnostics are
+     * always readable before the display blanks. */
     uefi_log_flush();
-
-    /* Wait for a keypress so the user can read the boxed log flush verdict
-     * above. This is deterministic and does not depend on the firmware's
-     * display-blank behavior: the screen stays on because we are waiting for
-     * input, and the user presses a key when they are done reading. */
-    Print(L"\nPRESS A KEY to CONTINUE...\n");
-    {
-        EFI_INPUT_KEY key;
-        EFI_STATUS ks;
-
-        for (;;) {
-            /* Poll for a key. ReadKeyStroke returns EFI_NOT_READY when no
-             * key is pending; we just keep polling. */
-            ks = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 1, ST->ConIn,
-                                   &key);
-            if (!EFI_ERROR(ks))
-                break;
-            uefi_call_wrapper(BS->Stall, 1, 100000);   /* 0.1 s */
-        }
-    }
+    uefi_wait_for_key();
 
     /* 5. Hand off to the bootloader / OS on the BSP (core 0).
      *
