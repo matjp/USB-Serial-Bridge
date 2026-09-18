@@ -339,7 +339,23 @@ uefi_bringup_highest_core(void)
      * (level assert) then a STARTUP IPI with the trampoline's page number.
      * The AP begins executing the trampoline, which switches to long mode
      * and jumps to ap_entry64(), which loads the bridge stack and calls
-     * bridge_entry() (B5). */
+     * bridge_entry() (B5).
+     *
+     * ASSUMPTION: the target AP is dormant at this point. We run in the UEFI
+     * boot phase (before ExitBootServices); UEFI runs on the BSP and does not
+     * start APs, so the highest core is idle and safe to claim. We do NOT
+     * check whether the AP is already in use - the bridge is designed to OWN
+     * this core, and the INIT+SIPI sequence resets the AP into a known state
+     * regardless. Keeping the OS from later using this core is an OS-side
+     * accommodation (reserve the core / TDM-share it), handled at the
+     * OS-integration layer (O1/O2), not here.
+     *
+     * NOTE: this runs BEFORE ExitBootServices. That is intentional and safe:
+     * the AP runs its own code (bridge) with its own page tables, stack, and
+     * GDT, and never calls UEFI services. The bridge code/static data live in
+     * the UEFI image, which our page tables identity-map and which stays
+     * resident, so the AP can execute it. Starting the bridge now lets it
+     * publish its status/fault record before we hand off to the OS. */
     send_init_ipi(highest_core);
     send_startup_ipi(highest_core, STARTUP_VECTOR);
 
