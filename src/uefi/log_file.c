@@ -252,9 +252,12 @@ uefi_log_init(EFI_HANDLE image)
     }
     g_root = root;
 
-    /* 5. Open (or create) the log file. CREATE opens at position 0, so each
-     *    boot overwrites the previous run's log. This also proves the volume
-     *    is actually writable. */
+    /* 5. Open (or create) the log file. This also proves the volume is
+     *    actually writable. NOTE: EFI_FILE_MODE_CREATE only creates the file
+     *    if it does not already exist; it does NOT truncate an existing file.
+     *    So we explicitly truncate below (step 5b) to guarantee each boot
+     *    starts with a fresh, empty log rather than leaving stale tail bytes
+     *    from a previous, longer run. */
     status = uefi_call_wrapper(root->Open, 5, root, &g_log_file,
                                L"\\bridge-debug.log",
                                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
@@ -264,6 +267,29 @@ uefi_log_init(EFI_HANDLE image)
         Print(L"BRIDGE-DBG: log_init: open bridge-debug.log failed (%r)\n",
               status);
         return EFI_UNSUPPORTED;
+    }
+
+    /* 5b. Truncate the file to zero length so a previous run's log does not
+     *     linger. SetInfo with EFI_FILE_INFO and FileSize=0 resizes the file
+     *     to empty; the file position is then reset to 0 for the first write.
+     *     This is the only reliable way to overwrite an existing log in UEFI
+     *     (EFI_FILE_MODE_CREATE alone does not truncate). */
+    {
+        EFI_FILE_INFO file_info;
+        UINTN info_size = SIZE_OF_EFI_FILE_INFO;
+
+        /* Zero the struct so all fields (times, attributes, ...) are valid
+         * defaults; only FileSize matters for truncation. */
+        uefi_call_wrapper(BS->SetMem, 3, &file_info, sizeof(file_info), 0);
+        file_info.FileSize = 0;
+
+        status = uefi_call_wrapper(g_log_file->SetInfo, 4, g_log_file,
+                                   &gEfiFileInfoGuid, info_size, &file_info);
+        if (EFI_ERROR(status)) {
+            Print(L"BRIDGE-DBG: log_init: truncate bridge-debug.log failed "
+                  L"(%r)\n", status);
+            return EFI_UNSUPPORTED;
+        }
     }
 
     /* 6. Best-effort removable-media diagnostic. Not a hard gate: the USB
