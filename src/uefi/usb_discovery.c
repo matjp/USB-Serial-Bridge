@@ -144,24 +144,17 @@ uefi_verify_xhci(void)
     }
 
     for (i = 0; i < num_handles; i++) {
-        Print(L"BRIDGE-DBG: verify: loop i=%d/%d HandleProtocol\n",
-              i, num_handles);
         status = uefi_call_wrapper(
             BS->HandleProtocol, 3,
             handles[i], &gEfiPciIoProtocolGuid, (VOID **)&pci);
-        if (EFI_ERROR(status) || pci == NULL) {
-            Print(L"BRIDGE-DBG: verify:   HandleProtocol -> %r\n", status);
+        if (EFI_ERROR(status) || pci == NULL)
             continue;
-        }
 
         /* Read the class code at config offset 0x08 (registers 0x08-0x0B:
          * 0x08 = revision, 0x09 = prog-if, 0x0A = subclass, 0x0B = base
          * class). The 32-bit read at 0x08 gives base<<24 | sub<<16 |
          * progif<<8 | rev. We want base=0x0C, sub=0x03, progif=0x30. */
-        Print(L"BRIDGE-DBG: verify:   Pci.Read class @0x08\n");
         status = pci_read_config32(pci, 0x08, &class_code);
-        Print(L"BRIDGE-DBG: verify:   class=%08X status=%r\n",
-              class_code, status);
         if (EFI_ERROR(status))
             continue;
 
