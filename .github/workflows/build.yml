@@ -128,7 +128,12 @@ jobs:
           echo "=== Compare on-disk file to the downloaded artifact ==="
           cmp /tmp/BOOTX64.EFI efi/bridge-debug.efi && echo "MATCH: on-disk BOOTX64.EFI is byte-identical to the artifact" || echo "DIFFER: on-disk BOOTX64.EFI differs from the artifact"
 
-      - name: Boot in OVMF and check for success
+      # Boot the EFI app in OVMF and capture the serial/console log. This is a
+      # standalone step so the log-file readback (next step) can run as its own
+      # check. The readback only makes sense in OVMF (where we can inspect the
+      # USB drive image after boot) - it does not apply to real hardware, where
+      # the log file lives on the physical USB stick.
+      - name: Boot in OVMF
         run: |
           # The ovmf package names its firmware files differently across Ubuntu
           # versions (OVMF_CODE.fd/OVMF_VARS.fd vs the 4M variants). Detect
@@ -184,12 +189,16 @@ jobs:
           echo "=== OVMF boot log ==="
           cat /tmp/ovmf.log
 
-          # Verify the robust log writer created bridge-debug.log on the USB
-          # drive and read it back. This runs BEFORE the XHCI bring-up check so
-          # we always verify the log writer even if the (separate, known)
-          # bridge-core bring-up has not been implemented yet and the XHCI
-          # check fails. The log writer only activates on a removable USB boot
-          # drive, so its presence proves the USB-boot path exercised it.
+      # Verify the robust log writer created bridge-debug.log on the USB drive
+      # and read it back. This is a separate step after boot (OVMF-only - it
+      # inspects the USB drive image, which does not apply to real hardware).
+      # It runs BEFORE the XHCI bring-up check so we always verify the log
+      # writer even if the (separate, known) bridge-core bring-up has not been
+      # implemented yet and the XHCI check fails. The log writer only activates
+      # on a removable USB boot drive, so its presence proves the USB-boot path
+      # exercised it.
+      - name: Verify log file readback
+        run: |
           echo "=== Checking bridge-debug.log was written to the USB drive ==="
           mdir -i /tmp/bridge.img ::/ || true
           if mdir -i /tmp/bridge.img ::/ | grep -qi "bridge-debug.log"; then
@@ -203,6 +212,8 @@ jobs:
             exit 1
           fi
 
+      - name: Check for XHCI bring-up success
+        run: |
           echo "=== Checking for XHCI bring-up success ==="
           if grep -q "BRIDGE OK: XHCI bring-up succeeded" /tmp/ovmf.log; then
             echo "OVMF TEST PASSED: bridge brought up XHCI"
