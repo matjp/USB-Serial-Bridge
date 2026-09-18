@@ -120,11 +120,32 @@ log_diag(const CHAR16 *msg)
                           (CHAR16 *)msg);
 }
 
+/* Return TRUE if the string is blank, i.e. contains only whitespace and/or
+ * newline characters (e.g. "\n", "\r\n", "\n\n"). Such strings are emitted
+ * purely to separate sections on the console; we skip them in the log file
+ * so the log stays compact (no blank lines). */
+static BOOLEAN
+log_is_blank(const CHAR16 *str)
+{
+    UINTN i;
+
+    if (str == NULL)
+        return TRUE;
+
+    for (i = 0; str[i] != 0; i++) {
+        CHAR16 c = str[i];
+        if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+            return FALSE;
+    }
+    return TRUE;
+}
+
 /* Append a NUL-terminated CHAR16 string to the log file, then flush it to
  * disk. Flushing after every write is deliberate: if the app later hangs or
  * faults (e.g. on real hardware), the log content up to that point is already
- * on disk rather than stuck in the FAT driver's buffer. Returns EFI_SUCCESS
- * if written, EFI_NOT_READY if no file is open. */
+ * on disk rather than stuck in the FAT driver's buffer. Blank strings (only
+ * whitespace/newlines) are skipped so the log has no empty lines. Returns
+ * EFI_SUCCESS if written, EFI_NOT_READY if no file is open. */
 static EFI_STATUS
 log_write_string(const CHAR16 *str)
 {
@@ -136,6 +157,10 @@ log_write_string(const CHAR16 *str)
         g_last_log_status = EFI_NOT_READY;
         return EFI_NOT_READY;
     }
+
+    /* Skip blank lines so the log stays compact. */
+    if (log_is_blank(str))
+        return EFI_SUCCESS;
 
     while (str[len] != 0)
         len++;
