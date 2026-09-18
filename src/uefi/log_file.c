@@ -22,14 +22,16 @@
  *      through the wrapper, which mirrors the text to the real console AND
  *      appends it to the log file.
  *
- * The wrapper's OutputString is marked __attribute__((ms_abi)) because the
- * firmware (OVMF) is built with the MS x64 ABI while this app is built with
- * the SysV ABI (EFIAPI is empty here). If firmware ever calls
- * ST->ConOut->OutputString directly, a plain SysV handler would receive its
- * arguments in the wrong registers and corrupt memory (the #PF seen in the
- * previous revision). The ms_abi attribute makes the handler correct for
- * BOTH callers. The handler also validates its String pointer and guards
- * against re-entrancy.
+ * The wrapper's OutputString MUST be ms_abi. GNU-EFI's Print() calls
+ * ST->ConOut->OutputString via uefi_call_wrapper (MS x64 ABI) unless the
+ * function is one of GNU-EFI's own internal printers (IsLocalPrint). Our
+ * wrapper is not one of those, so it is invoked with the MS ABI. This app is
+ * otherwise built with the SysV ABI (EFIAPI is empty here), so a plain SysV
+ * handler would receive its arguments in the wrong registers and corrupt
+ * memory (the #PF/reboot seen in the previous revisions). The ms_abi
+ * attribute makes the handler correct for the uefi_call_wrapper invocation.
+ * The handler also validates its String pointer and guards against
+ * re-entrancy.
  *
  * On ANY failure the app continues with console-only output; it never
  * crashes and never blocks boot.
@@ -43,6 +45,17 @@
 #include <efidevp.h>
 
 #include "log_file.h"
+
+/* The firmware (OVMF) and GNU-EFI's uefi_call_wrapper invoke the console
+ * OutputString with the MS x64 ABI, while this app is built with the SysV
+ * ABI (EFIAPI is empty). Mark the wrapper ms_abi so it receives its
+ * arguments in the correct registers. The struct field EFI_TEXT_OUTPUT_STRING
+ * is typed EFIAPI (SysV), so we cast when assigning. */
+#if defined(__GNUC__) && defined(__x86_64__)
+#define BRIDGE_MS_ABI __attribute__((ms_abi))
+#else
+#define BRIDGE_MS_ABI
+#endif
 
 /* The open log file handle, or NULL if logging is not active. */
 static EFI_FILE *g_log_file = NULL;
@@ -112,12 +125,12 @@ log_write_string(const CHAR16 *str)
  * Wrapper OutputString: mirror to the real console and append to the log.
  * This is what ST->ConOut->OutputString points at after uefi_log_init().
  *
- * The struct field EFI_TEXT_OUTPUT_STRING is declared EFIAPI (SysV ABI in
- * this build), and GNU-EFI's Print() calls it with SysV convention, so the
- * wrapper must be EFIAPI to match. Defensive: validates String, guards
- * re-entrancy.
+ * GNU-EFI's Print() calls this via uefi_call_wrapper (MS x64 ABI) because
+ * IsLocalPrint() returns false for our wrapper, so it MUST be ms_abi to
+ * receive its arguments in the correct registers. Defensive: validates
+ * String, guards re-entrancy.
  */
-static EFI_STATUS EFIAPI
+static EFI_STATUS BRIDGE_MS_ABI
 wrapper_output_string(SIMPLE_TEXT_OUTPUT_INTERFACE *This, CHAR16 *String)
 {
     (void)This; /* wrapper is a singleton; the real console is g_real_conout */
@@ -228,7 +241,10 @@ uefi_log_init(EFI_HANDLE image)
      *    other operation (SetAttribute, ClearScreen, Mode, ...) still works,
      *    and override only OutputString. */
     g_console_wrapper = *g_real_conout;
-    g_console_wrapper.OutputString = wrapper_output_string;
+    /* Cast: the struct field is typed EFIAPI (SysV) but the handler is
+     * ms_abi so uefi_call_wrapper invokes it correctly. */
+    g_console_wrapper.OutputString =
+        (EFI_TEXT_OUTPUT_STRING)wrapper_output_string;
     ST->ConOut = &g_console_wrapper;
 
     Print(L"BRIDGE-DBG: log_init: log writer active on boot volume\n");
