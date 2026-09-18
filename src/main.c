@@ -15,6 +15,7 @@
 #include <efilib.h>
 
 #include "uefi/uefi.h"
+#include "uefi/exception_handler.h"
 
 EFI_STATUS
 EFIAPI
@@ -27,6 +28,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
      * the SystemTable globals before this dereferences null/garbage and
      * crashes (#UD). */
     InitializeLib(image, systab);
+
+    /* Install the CPU exception trap (debug aid) so a fault inside the app
+     * prints a register dump + stack trace and halts, instead of dying in
+     * the firmware's default handler. No-op if the platform lacks
+     * EFI_CPU_ARCH_PROTOCOL. */
+    uefi_install_exception_handler(image);
 
     Print(L"BRIDGE-DBG: efi_main entered, InitializeLib done\n");
     Print(L"USB HID -> Virtual 8042 Port Bridge\n");
