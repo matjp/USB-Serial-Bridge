@@ -145,10 +145,17 @@ log_is_blank(const CHAR16 *str)
  * faults (e.g. on real hardware), the log content up to that point is already
  * on disk rather than stuck in the FAT driver's buffer. Blank strings (only
  * whitespace/newlines) are skipped so the log has no empty lines. Returns
- * EFI_SUCCESS if written, EFI_NOT_READY if no file is open. */
+ * EFI_SUCCESS if written, EFI_NOT_READY if no file is open.
+ *
+ * Line-ending normalization: GNU-EFI's Print() emits CRLF (\r\n) for every
+ * newline, and the console renders that as a single line break. But a raw
+ * \r\n in the log file is rendered as a blank line by many editors/viewers
+ * (they treat \r and \n as separate breaks). So we strip the \r characters
+ * here, writing clean LF-only line endings to the log. */
 static EFI_STATUS
 log_write_string(const CHAR16 *str)
 {
+    CHAR16 buf[256];
     UINTN len = 0;
     UINTN size;
     EFI_STATUS status;
@@ -162,15 +169,30 @@ log_write_string(const CHAR16 *str)
     if (log_is_blank(str))
         return EFI_SUCCESS;
 
-    while (str[len] != 0)
-        len++;
+    /* Copy the string into a local buffer, dropping \r so the log uses clean
+     * LF-only line endings (no blank lines when viewed). */
+    {
+        UINTN src = 0;
+        UINTN dst = 0;
+
+        while (str[src] != 0 &&
+               dst < (sizeof(buf) / sizeof(buf[0])) - 1) {
+            if (str[src] != L'\r') {
+                buf[dst] = str[src];
+                dst++;
+            }
+            src++;
+        }
+        buf[dst] = 0;
+        len = dst;
+    }
 
     size = len * sizeof(CHAR16);
     if (size == 0)
         return EFI_SUCCESS;
 
     status = uefi_call_wrapper(g_log_file->Write, 3, g_log_file, &size,
-                               (VOID *)str);
+                               (VOID *)buf);
     g_last_log_status = status;
     if (EFI_ERROR(status)) {
         /* Report the failure to the real console so we can see why the log
