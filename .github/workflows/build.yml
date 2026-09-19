@@ -172,6 +172,15 @@ jobs:
           # OVMF's USB stack enumerates as a removable USB drive, so the
           # device-path (MSG_USB_DP) and BlockIo RemovableMedia checks pass.
           # qemu-xhci provides the XHCI >= 1.0 controller the bridge requires.
+          #
+          # We run QEMU in the BACKGROUND with an HMP monitor socket so we can
+          # inject USB HID input (sendkey / mouse_move / mouse_button) while it
+          # runs. Without injection the usb-kbd/usb-mouse devices enumerate but
+          # never produce a transfer event, so the bridge observer sees nothing.
+          # We send input REPEATEDLY but SLOWLY (a key/mouse event every ~1.5s)
+          # so the bridge AP has time to observe each completed transfer and
+          # translate it to PS/2 before the next one arrives.
+          rm -f /tmp/qemu-mon /tmp/ovmf.log
           timeout 45 qemu-system-x86_64 \
             -machine q35,accel=tcg \
             -cpu max \
@@ -185,7 +194,65 @@ jobs:
             -device usb-kbd \
             -device usb-mouse \
             -nographic \
-            -serial mon:stdio > /tmp/ovmf.log 2>&1 || true
+            -serial stdio \
+            -monitor unix:/tmp/qemu-mon,server,nowait > /tmp/ovmf.log 2>&1 &
+          QEMU_PID=$!
+
+          # Wait for the bridge to come up (OVMF boot + app setup + AP bring-up).
+          # The log shows "Bridge setup complete" once the BSP has finished setup
+          # and the AP is polling. Poll the log for it (bounded).
+          echo "Waiting for bridge setup to complete..."
+          for i in $(seq 1 60); do
+            if grep -q "Bridge setup complete" /tmp/ovmf.log 2>/dev/null; then
+              echo "Bridge setup complete detected after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          # Inject USB HID input repeatedly but slowly via the HMP monitor.
+          # Each sendkey/mouse event produces a transfer on the interrupt IN
+          # endpoint that the bridge observer polls. We sleep between sends so
+          # the bridge has time to observe + translate each one.
+          python3 - <<'PYEOF'
+          import socket, time, sys
+
+          def hmp(cmd):
+              try:
+                  s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                  s.settimeout(2)
+                  s.connect("/tmp/qemu-mon")
+                  s.sendall((cmd + "\n").encode())
+                  time.sleep(0.2)
+                  s.close()
+              except Exception as e:
+                  print("hmp send failed: %s" % e, file=sys.stderr)
+
+          keys = ["a", "b", "c", "1", "2", "3", "spc", "ret", "esc", "tab"]
+          # Wait a moment for the AP to be polling before the first event.
+          time.sleep(2)
+          for i in range(6):
+              k = keys[i % len(keys)]
+              print("sendkey %s" % k)
+              hmp("sendkey %s" % k)
+              time.sleep(1.5)
+              # Mouse: move then click (press + release).
+              x = 50 + i * 20
+              y = 50 + i * 10
+              print("mouse_move %d %d" % (x, y))
+              hmp("mouse_move %d %d" % (x, y))
+              time.sleep(1.5)
+              print("mouse_button 1")
+              hmp("mouse_button 1")
+              time.sleep(0.5)
+              print("mouse_button 0")
+              hmp("mouse_button 0")
+              time.sleep(1.5)
+          print("input injection complete")
+          PYEOF
+
+          # Wait for QEMU to finish (timeout kills it at 45s).
+          wait $QEMU_PID || true
           echo "=== OVMF boot log ==="
           cat /tmp/ovmf.log
 
