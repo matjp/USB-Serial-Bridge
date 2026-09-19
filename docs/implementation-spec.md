@@ -1,7 +1,7 @@
 # Firmware Coder Implementation Spec
 ## Exact interfaces, structs, and function signatures for B1–B5, U1–U3, O1
 
-**Document version:** 1.3 (AP is a read-only passive observer of xHCI rings before EBS)
+**Document version:** 1.4 (AP is a read-only passive observer of xHCI rings before EBS, then TAKES OVER UEFI's rings after EBS)
 **Status:** Approved — Layer 2 (O1) implemented; Layer 1 real-hardware bring-up pending
 **Author:** Principal Software Architect
 **Target:** GNU-EFI 4.0.2, x86_64 UEFI application (PE32+), ISO C99, no std headers
@@ -119,21 +119,29 @@ typedef struct {
 periodic interrupt IN transfers on the two pre-discovered low/full-speed endpoints.
 No SuperSpeed, no enumeration, no hotplug, no interrupts.
 
-**Two modes (critical — the AP is a READ-ONLY passive observer before `ExitBootServices`):**
+**Two modes (critical — the AP is a READ-ONLY passive observer before `ExitBootServices`,**
+**then TAKES OVER UEFI's rings after it):**
 - **Read-only passive observer (`bridge_observer_poll`)** — used **before**
   `ExitBootServices`. The UEFI firmware is single-threaded on the BSP and its `XhciDxe`
   driver owns the xHCI state machine, so the AP must NOT write to the controller. The
   observer reads UEFI's event ring **read-only**, fills the raw HID reports, and
   advances its **own** event-ring dequeue index + cycle bit in memory only. It NEVER
   writes `ERDP`, doorbells, or re-arms rings — UEFI on the BSP remains the sole owner.
-- **Full bring-up (`bridge_poll_usb`)** — used **after** `ExitBootServices`, when the
-  AP becomes the sole owner of the xHCI rings and performs the writes (reset, setup
-  rings, setup devices, RUN, doorbells, `ERDP` updates, rearm).
+- **True takeover (`bridge_takeover_poll`)** — used **after** `ExitBootServices`, when
+  the AP becomes the **sole owner** of the xHCI controller. Rather than resetting the
+  controller and re-creating rings/device contexts from scratch, the bridge **takes
+  over the rings UEFI already configured** (captured in the `XHCI_OBSERVER`): it
+  continues polling UEFI's event ring and now also (a) writes `ERDP` to advance the
+  event ring, and (b) re-arms the transfer-ring TRBs + rings the doorbells so the
+  periodic IN transfers keep running (UEFI is gone and would otherwise stop re-arming
+  them). **No reset, no ring/device-context re-creation.**
 
 **Public interface (already in `src/bridge/bridge.h`):**
 ```c
-void bridge_poll_usb(void);                       /* full bring-up (post-EBS) */
-void bridge_observer_poll(const XHCI_OBSERVER *obs); /* read-only observer (pre-EBS) */
+void bridge_poll_usb(void);                       /* legacy full from-scratch bring-up
+                                                     (kept for test_xhci_fault.c only) */
+void bridge_observer_poll(const XHCI_OBSERVER *obs);  /* read-only observer (pre-EBS) */
+void bridge_takeover_poll(const XHCI_OBSERVER *obs);  /* true takeover (post-EBS) */
 ```
 
 **The observer (`src/bridge/xhci_observer.h`):** a fixed-address struct in the reserved
@@ -168,31 +176,6 @@ typedef struct {
 } XHCI;
 ```
 
-**Required implementation steps (full bring-up, `bridge_poll_usb`, post-EBS):**
-1. **Verify XHCI ≥ 1.0 (C6)** — read `HCSPARAMS1`/`HCCPARAMS` capability registers.
-   The XHCI spec version is in `HCCPARAMS1` bits 31:24 (e.g. 0x10 = 1.0). If < 1.0,
-   halt and signal failure (see B5 error handling). This is a belt-and-suspenders check
-   on top of U1's check.
-2. **Reset the controller** (`USBCMD` HCRST), wait for `USBSTS` HCHalted.
-3. **Program the device context base array** (`DCBAAP`), allocate slot/endpoint context
-   for the two devices. Because U1 already enumerated the devices, the bridge must
-   **re-create the minimal device/endpoint context** for the two known endpoints — it
-   does not re-enumerate.
-4. **Set up two interrupt IN endpoints** as periodic transfers:
-   - Allocate a transfer ring (TRB ring) per endpoint.
-   - Program the endpoint context with the recorded `interval`, `max_packet`, `speed`.
-   - Ring the doorbell to start the periodic IN.
-5. **Poll for completion** — check the event ring / `ERDP` for Transfer Event TRBs.
-   On a successful transfer, copy the received bytes into a raw HID report buffer.
-6. **Produce raw HID reports** for B2:
-   ```c
-   /* file-local output consumed by bridge_parse_hid() */
-   extern HID_KBD_REPORT   g_raw_kbd;    /* 8 bytes */
-   extern HID_MOUSE_REPORT g_raw_mouse;  /* 3 bytes */
-   extern BOOLEAN g_kbd_valid;           /* set when a fresh kbd report is ready */
-   extern BOOLEAN g_mouse_valid;         /* set when a fresh mouse report is ready */
-   ```
-
 **Required implementation steps (read-only observer, `bridge_observer_poll`, pre-EBS):**
 1. Read the event-ring TRB at the AP's **own** tracked dequeue index (`g_obs_deq`).
 2. If the TRB's cycle bit does not match the AP's tracked cycle bit (`g_obs_cycle`),
@@ -205,13 +188,43 @@ typedef struct {
    event_ring_size`), toggling `g_obs_cycle` on wrap. **Never write `ERDP`** — UEFI on
    the BSP remains the sole owner of the controller.
 
+**Required implementation steps (true takeover, `bridge_takeover_poll`, post-EBS):**
+1. Set up the register block via `xhci_init` (read-only capability reads) and get the
+   topology (for the endpoint numbers + MMIO base).
+2. Poll UEFI's event ring exactly as the observer does (same `g_obs_deq`/`g_obs_cycle`
+   tracking, so the takeover continues seamlessly where the observer left off).
+3. On a completed transfer event, fill `g_raw_kbd`/`g_raw_mouse` + set the valid flags
+   (same matching by page-aligned transfer-ring base).
+4. **Re-arm the completed transfer-ring TRB** (flip its cycle bit back) and **ring the
+   doorbell** for that endpoint (`xhci_ring_endpoint_doorbell` with the topology's
+   endpoint and the observer's slot). UEFI is gone and would otherwise stop re-arming
+   the periodic IN transfers.
+5. **Write `ERDP`** to advance the event ring to the next TRB
+   (`erdp = event_ring_addr + g_obs_deq * sizeof(TRB)`). The AP is now the sole owner,
+   so it may write `ERDP` (unlike the observer).
+
+**Legacy full bring-up (`bridge_poll_usb`):** the original from-scratch bring-up that
+resets the controller and re-creates rings/device contexts. It is **NOT** the production
+post-EBS path — it is kept only because `tests/test_xhci_fault.c` drives it against a
+mock register file to test the fault paths.
+
+**Produce raw HID reports** for B2 (shared by all modes):
+```c
+/* file-local output consumed by bridge_parse_hid() */
+extern HID_KBD_REPORT   g_raw_kbd;    /* 8 bytes */
+extern HID_MOUSE_REPORT g_raw_mouse;  /* 3 bytes */
+extern BOOLEAN g_kbd_valid;           /* set when a fresh kbd report is ready */
+extern BOOLEAN g_mouse_valid;         /* set when a fresh mouse report is ready */
+```
+
 **Constraints:**
 - XHCI ≥ 1.0 only. No EHCI/UHCI/OHCI.
 - No SuperSpeed — only the two low/full-speed interrupt endpoints.
-- No interrupts — poll the event ring in `bridge_poll_usb()`.
+- No interrupts — poll the event ring.
 - No enumeration, no hotplug — fixed topology from U1.
 - **Before `ExitBootServices`, the AP must NEVER write to the xHCI controller** — it is
-  a read-only passive observer. The full bring-up (writes) happens only after EBS.
+  a read-only passive observer. After EBS, the AP **takes over** UEFI's rings (writes
+  `ERDP` + re-arms + doorbells) without resetting or re-creating them.
 
 **Debugging model (UEFI → XHCI handoff):** The controller is handed off from UEFI in
 an unknown, partially-configured state, so re-configuring it is the most failure-prone
@@ -430,17 +443,20 @@ void bridge_entry(void);
        /* Before ExitBootServices, the AP is a READ-ONLY passive observer of the
           xHCI rings (UEFI's XhciDxe owns the controller on the BSP). The observer
           reads UEFI's event ring read-only and fills the raw HID reports; it never
-          writes to the controller. The full bring-up (bridge_poll_usb, which
-          writes) is deferred until after ExitBootServices when the AP becomes the
-          sole owner. */
+          writes to the controller. After ExitBootServices, the AP becomes the sole
+          owner and TAKES OVER UEFI's rings (bridge_takeover_poll): it continues
+          polling UEFI's event ring and now also writes ERDP + re-arms the transfer
+          rings + rings the doorbells. No reset, no ring/device-context re-creation.
+          bridge_poll_usb (full from-scratch bring-up) is legacy, kept only for the
+          host fault-injection test. */
        const XHCI_OBSERVER *obs = (const XHCI_OBSERVER *)(UINTN)XHCI_OBSERVER_ADDR;
        for (;;) {
            if (bridge_usb_fatal()) { for (;;) __asm__ __volatile__("hlt"); }
-           bridge_observer_poll(obs);   /* B1 read-only observer (pre-EBS) */
-           /* after EBS: bridge_poll_usb();  B1 full bring-up (sole owner) */
-           bridge_parse_hid();          /* B2 */
-           bridge_translate_ps2();      /* B3 */
-           bridge_write_virtual_ps2();  /* B4 */
+           bridge_observer_poll(obs);    /* B1 read-only observer (pre-EBS) */
+           bridge_takeover_poll(obs);    /* B1 true takeover (post-EBS) */
+           bridge_parse_hid();           /* B2 */
+           bridge_translate_ps2();       /* B3 */
+           bridge_write_virtual_ps2();   /* B4 */
            /* TDM: yield the core back to the OS background task (Seth) until
               the next bridge time slot. Implemented by the timer ISR that
               switches between bridge context and OS task context. */

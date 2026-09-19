@@ -31,9 +31,11 @@ bridge_entry(void)
      * it would race with the BSP and trigger a #GP / halt / failed
      * ExitBootServices. The observer (bridge_observer_poll) reads UEFI's
      * event ring read-only and duplicates packets into VIRTUAL_PS2_BASE,
-     * never writing to the controller. The full bring-up (bridge_poll_usb)
-     * is deferred until after ExitBootServices, when the AP becomes the
-     * sole owner of the xHCI rings. */
+     * never writing to the controller. After ExitBootServices, the AP
+     * becomes the sole owner and TAKES OVER UEFI's rings (bridge_takeover_poll):
+     * it continues polling UEFI's event ring and now also writes ERDP +
+     * re-arms the transfer rings + rings the doorbells. No reset, no
+     * ring/device-context re-creation. */
     const XHCI_OBSERVER *obs = (const XHCI_OBSERVER *)(UINTN)XHCI_OBSERVER_ADDR;
 
     for (;;) {
@@ -47,6 +49,12 @@ bridge_entry(void)
         /* Read-only passive observer (B1, pre-EBS): poll UEFI's event ring
          * and fill the raw HID reports. No writes to the xHCI controller. */
         bridge_observer_poll(obs);
+
+        /* After ExitBootServices, the AP is the sole owner: take over UEFI's
+         * rings (write ERDP + re-arm + doorbell). This is the production
+         * post-EBS path; bridge_poll_usb() (full from-scratch bring-up) is
+         * only kept for the host fault-injection test. */
+        bridge_takeover_poll(obs);
 
         /* Parse HID reports (B2) and translate to PS/2 (B3). */
         bridge_parse_hid();

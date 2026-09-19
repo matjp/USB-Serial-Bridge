@@ -8,10 +8,20 @@
  * hotplug, no interrupts - minimal periodic polling.
  *
  * The bridge drives the XHCI controller directly via MMIO (the UEFI USB
- * protocols are boot-time only and may not survive ExitBootServices). The
- * controller is reset and a minimal device/endpoint context is re-created
- * for the two known endpoints (per docs/implementation-spec.md section 2.1);
- * the bridge does NOT re-enumerate.
+ * protocols are boot-time only and may not survive ExitBootServices).
+ *
+ * Two modes:
+ *  - Before ExitBootServices, the AP is a READ-ONLY passive observer
+ *    (bridge_observer_poll): it polls UEFI's event ring read-only and never
+ *    writes to the controller (the BSP's XhciDxe driver owns it).
+ *  - After ExitBootServices, the AP TAKES OVER the rings UEFI already
+ *    configured (bridge_takeover_poll): it continues polling UEFI's event
+ *    ring and now also writes ERDP + re-arms the transfer rings + rings the
+ *    doorbells. No reset, no ring/device-context re-creation.
+ *
+ * bridge_poll_usb() is the legacy full from-scratch bring-up (reset + re-
+ * create rings/device contexts); it is kept for the host fault-injection
+ * test (tests/test_xhci_fault.c) but is NOT the production post-EBS path.
  *
  * NOTE: This is a hardware-validation (Layer 1) module. The register
  * programming follows the XHCI 1.x specification. The root-hub port number
@@ -803,6 +813,120 @@ bridge_poll_usb(void)
             xhci_rearm_transfer(&g_xhci, &g_tr_mouse, topo->mouse.endpoint, 2);
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* bridge_takeover_poll(): true takeover of UEFI's xHCI rings (post-EBS). */
+/*                                                                     */
+/* After ExitBootServices, the UEFI firmware vanishes and the bridge AP */
+/* becomes the SOLE OWNER of the xHCI controller. Rather than resetting */
+/* the controller and re-creating rings/device contexts from scratch,   */
+/* the bridge TAKES OVER the rings UEFI already configured (captured in */
+/* the XHCI_OBSERVER): it continues polling UEFI's event ring, and now  */
+/* also (a) writes ERDP to advance the event ring, and (b) re-arms the  */
+/* transfer-ring TRBs + rings the doorbells so the periodic IN          */
+/* transfers keep running (UEFI is gone and would otherwise stop        */
+/* re-arming them). No reset, no ring/device-context re-creation.       */
+/*                                                                     */
+/* This is the post-ExitBootServices counterpart to the read-only       */
+/* observer: it reuses the SAME event-ring dequeue index + cycle bit    */
+/* (g_obs_deq / g_obs_cycle) the observer maintained, so the takeover   */
+/* continues seamlessly where the observer left off.                   */
+/* ------------------------------------------------------------------ */
+void
+bridge_takeover_poll(const XHCI_OBSERVER *obs)
+{
+    const USB_TOPOLOGY *topo;
+    TRB *evt;
+    UINT32 cc;
+    UINT64 trb_ptr;
+    UINT8 *buf;
+    UINTN len;
+    UINT64 erdp;
+
+    if (g_xhci_fatal)
+        return;
+
+    if (obs == NULL || obs->event_ring_addr == 0 || obs->event_ring_size == 0)
+        return;
+
+    topo = usb_topology_get();
+    if (topo == NULL) {
+        xhci_fault(NULL, XHCI_STAGE_NONE, XHCI_FAULT_HINT_NONE);
+        return;
+    }
+
+    /* Set up the register block (read-only capability reads). */
+    xhci_init(&g_xhci, topo);
+    xhci_fault_publish_rec();
+
+    /* Read the event ring TRB at our tracked dequeue index. */
+    evt = (TRB *)(UINTN)(obs->event_ring_addr +
+                         (UINT64)g_obs_deq * sizeof(TRB));
+
+    /* Cycle bit mismatch: no new event from the controller. */
+    if (((evt->field3 >> 0) & 1u) != g_obs_cycle)
+        return;
+
+    if (((evt->field3 >> 6) & 0x3F) == TRB_TYPE_TRANSFER_EVENT) {
+        cc = (evt->field3 >> 24) & 0xFF;
+        if (cc == CC_SUCCESS || cc == CC_SHORT_PACKET) {
+            trb_ptr = ((UINT64)evt->field1 << 32) | evt->field0;
+
+            /* Match the completed TRB to the kbd/mouse transfer ring by
+             * page-aligned base (a transfer ring fits within one page). */
+            if ((trb_ptr & ~0xFFFULL) == (obs->kbd_tr_addr & ~0xFFFULL)) {
+                TRB *ktr = (TRB *)(UINTN)trb_ptr;
+                buf = (UINT8 *)(UINTN)(((UINT64)ktr->field1 << 32) |
+                                       ktr->field0);
+                len = ktr->field2 & 0x1FFFF;
+                if (len > HID_KBD_REPORT_SIZE)
+                    len = HID_KBD_REPORT_SIZE;
+                g_raw_kbd.modifier = buf[0];
+                g_raw_kbd.reserved = buf[1];
+                g_raw_kbd.key[0]   = buf[2];
+                g_raw_kbd.key[1]   = buf[3];
+                g_raw_kbd.key[2]   = buf[4];
+                g_raw_kbd.key[3]   = buf[5];
+                g_raw_kbd.key[4]   = buf[6];
+                g_raw_kbd.key[5]   = buf[7];
+                g_kbd_valid = TRUE;
+
+                /* Re-arm the completed transfer-ring TRB and ring the
+                 * doorbell so the next periodic IN transfer is scheduled
+                 * (UEFI is gone and would otherwise stop re-arming). */
+                ktr->field3 ^= (1u << 0);
+                xhci_ring_endpoint_doorbell(&g_xhci, topo->kbd.endpoint,
+                                            obs->kbd_slot);
+            } else if ((trb_ptr & ~0xFFFULL) ==
+                       (obs->mouse_tr_addr & ~0xFFFULL)) {
+                TRB *mtr = (TRB *)(UINTN)trb_ptr;
+                buf = (UINT8 *)(UINTN)(((UINT64)mtr->field1 << 32) |
+                                       mtr->field0);
+                len = mtr->field2 & 0x1FFFF;
+                if (len > HID_MOUSE_REPORT_SIZE)
+                    len = HID_MOUSE_REPORT_SIZE;
+                g_raw_mouse.buttons = buf[0];
+                g_raw_mouse.dx      = (INT8)buf[1];
+                g_raw_mouse.dy      = (INT8)buf[2];
+                g_mouse_valid = TRUE;
+
+                /* Re-arm the completed transfer-ring TRB and ring the
+                 * doorbell. */
+                mtr->field3 ^= (1u << 0);
+                xhci_ring_endpoint_doorbell(&g_xhci, topo->mouse.endpoint,
+                                            obs->mouse_slot);
+            }
+        }
+    }
+
+    /* Advance our dequeue index and write ERDP (sole owner after EBS). */
+    g_obs_deq = (g_obs_deq + 1) % obs->event_ring_size;
+    if (g_obs_deq == 0)
+        g_obs_cycle ^= 1;
+    erdp = obs->event_ring_addr + (UINT64)g_obs_deq * sizeof(TRB);
+    xhci_write32(&g_xhci.rt[0x18 / 4], (UINT32)(erdp & 0xFFFFFFFFu));
+    xhci_write32(&g_xhci.rt[0x1C / 4], (UINT32)(erdp >> 32));
 }
 
 /* ------------------------------------------------------------------ */

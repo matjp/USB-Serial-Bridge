@@ -22,6 +22,12 @@ void bridge_poll_usb(void);
  * controller (the BSP's XhciDxe driver owns it before EBS). */
 void bridge_observer_poll(const XHCI_OBSERVER *obs);
 
+/* B1: True takeover of UEFI's xHCI rings (post-ExitBootServices). The AP
+ * is now the sole owner: it continues polling UEFI's event ring and now
+ * also writes ERDP + re-arms the transfer rings + rings the doorbells.
+ * No reset, no ring/device-context re-creation. */
+void bridge_takeover_poll(const XHCI_OBSERVER *obs);
+
 /* B1: Return TRUE if the USB controller is unusable (non-XHCI>=1.0 or a
  * fatal fault). The bridge halts cleanly when this is set. */
 BOOLEAN bridge_usb_fatal(void);
