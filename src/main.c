@@ -19,6 +19,25 @@
 #include "uefi/log_file.h"
 #include "bridge/bridge_debug.h"
 
+/* Log just the observer diagnostics (cumulative counters + current dequeue
+ * state). Called repeatedly from the BSP's Stall loop so the CI log shows
+ * how the observer progresses over time - in particular whether it starts
+ * seeing kbd/mouse transfer events once the CI input injection begins
+ * (which happens AFTER the one-shot uefi_log_bridge_output above). */
+static void
+uefi_log_observer_diag(void)
+{
+    BRIDGE_DEBUG_REC *dbg = (BRIDGE_DEBUG_REC *)(UINTN)BRIDGE_DEBUG_ADDR;
+
+    Print(L"BRIDGE-DBG: observer: polls=%u events=%u kbd=%u mouse=%u "
+          L"deq=%u cycle=%u last_type=%u last_cc=%u last_trb=%08X "
+          L"kbd_bytes=%u mouse_bytes=%u\n",
+          dbg->obs_polls, dbg->obs_events, dbg->obs_kbd, dbg->obs_mouse,
+          dbg->obs_deq, dbg->obs_cycle, dbg->obs_last_type,
+          dbg->obs_last_cc, dbg->obs_last_trb,
+          dbg->kbd_bytes, dbg->mouse_bytes);
+}
+
 /* Read back the bridge AP's captured serial output from shared memory and
  * log it. The AP (B4) appends every PS/2 byte it produces to the
  * BRIDGE_DEBUG ring buffer; the BSP reads it here BEFORE ExitBootServices
@@ -36,11 +55,7 @@ uefi_log_bridge_output(void)
           L"kbd_bytes=%u mouse_bytes=%u\n",
           head, tail, dbg->wrap, dbg->kbd_bytes, dbg->mouse_bytes);
 
-    Print(L"BRIDGE-DBG: observer: polls=%u events=%u kbd=%u mouse=%u "
-          L"deq=%u cycle=%u last_type=%u last_cc=%u last_trb=%08X\n",
-          dbg->obs_polls, dbg->obs_events, dbg->obs_kbd, dbg->obs_mouse,
-          dbg->obs_deq, dbg->obs_cycle, dbg->obs_last_type,
-          dbg->obs_last_cc, dbg->obs_last_trb);
+    uefi_log_observer_diag();
 
     n = head - tail;
     if (n > BRIDGE_DEBUG_CAP)
@@ -204,5 +219,12 @@ done:
      * halt is replaced by the actual handoff (e.g. ExitBootServices + jump). */
     for (;;) {
         uefi_call_wrapper(BS->Stall, 1, 10000000);   /* 10 s per iteration */
+
+        /* Re-read the observer diagnostics each iteration so the CI log
+         * captures how the observer progresses once the CI input injection
+         * begins (which happens after "Bridge setup complete" is logged).
+         * The one-shot uefi_log_bridge_output above runs before injection,
+         * so this periodic re-read is what shows the injected events. */
+        uefi_log_observer_diag();
     }
 }
