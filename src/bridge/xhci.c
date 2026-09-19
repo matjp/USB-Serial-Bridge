@@ -33,6 +33,7 @@
 #include <hid.h>
 
 #include "bridge.h"
+#include "bridge_debug.h"
 #include "usb_topology.h"
 #include "xhci_fault.h"
 #include "xhci_status.h"
@@ -1000,12 +1001,19 @@ bridge_observer_poll(const XHCI_OBSERVER *obs)
     UINT64 trb_ptr;
     UINT8 *buf;
     UINTN len;
+    BRIDGE_DEBUG_REC *dbg;
 
     if (g_xhci_fatal)
         return;
 
     if (obs == NULL || obs->event_ring_addr == 0 || obs->event_ring_size == 0)
         return;
+
+    /* Record observer diagnostics so the BSP can see how far we got. */
+    dbg = (BRIDGE_DEBUG_REC *)(UINTN)BRIDGE_DEBUG_ADDR;
+    dbg->obs_polls++;
+    dbg->obs_deq = g_obs_deq;
+    dbg->obs_cycle = g_obs_cycle;
 
     /* Read the event ring TRB at our tracked dequeue index. */
     evt = (TRB *)(UINTN)(obs->event_ring_addr +
@@ -1014,6 +1022,11 @@ bridge_observer_poll(const XHCI_OBSERVER *obs)
     /* Cycle bit mismatch: no new event from the controller. */
     if (((evt->field3 >> 0) & 1u) != g_obs_cycle)
         return;
+
+    dbg->obs_events++;
+    dbg->obs_last_type = (evt->field3 >> 6) & 0x3F;
+    dbg->obs_last_cc   = (evt->field3 >> 24) & 0xFF;
+    dbg->obs_last_trb  = (UINT32)(evt->field0);
 
     if (((evt->field3 >> 6) & 0x3F) == TRB_TYPE_TRANSFER_EVENT) {
         cc = (evt->field3 >> 24) & 0xFF;
@@ -1038,6 +1051,7 @@ bridge_observer_poll(const XHCI_OBSERVER *obs)
                 g_raw_kbd.key[4]   = buf[6];
                 g_raw_kbd.key[5]   = buf[7];
                 g_kbd_valid = TRUE;
+                dbg->obs_kbd++;
             } else if ((trb_ptr & ~0xFFFULL) ==
                        (obs->mouse_tr_addr & ~0xFFFULL)) {
                 TRB *mtr = (TRB *)(UINTN)trb_ptr;
@@ -1050,6 +1064,7 @@ bridge_observer_poll(const XHCI_OBSERVER *obs)
                 g_raw_mouse.dx      = (INT8)buf[1];
                 g_raw_mouse.dy      = (INT8)buf[2];
                 g_mouse_valid = TRUE;
+                dbg->obs_mouse++;
             }
         }
     }
@@ -1058,6 +1073,8 @@ bridge_observer_poll(const XHCI_OBSERVER *obs)
     g_obs_deq = (g_obs_deq + 1) % obs->event_ring_size;
     if (g_obs_deq == 0)
         g_obs_cycle ^= 1;
+    dbg->obs_deq = g_obs_deq;
+    dbg->obs_cycle = g_obs_cycle;
 }
 
 /* Return TRUE if the USB controller is unusable (non-XHCI>=1.0 or a fatal

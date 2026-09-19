@@ -51,6 +51,23 @@ typedef struct {
     volatile UINT32 kbd_bytes;   /* total keyboard bytes produced         */
     volatile UINT32 mouse_bytes; /* total mouse bytes produced            */
     volatile UINT8  data[BRIDGE_DEBUG_CAP];
+
+    /* --- Observer diagnostics (written by B1 bridge_observer_poll) ---
+     * These let the BSP see how far the passive observer got: how many
+     * times it polled, how many valid event-ring TRBs it saw, how many
+     * matched the kbd/mouse transfer rings, and its current dequeue
+     * index + cycle bit. If kbd_bytes==0, these tell us whether the
+     * observer is running at all, whether it is stuck on a cycle-bit
+     * mismatch, or whether it is seeing events that never match. */
+    volatile UINT32 obs_polls;       /* times bridge_observer_poll ran    */
+    volatile UINT32 obs_events;      /* valid (cycle-matching) TRBs seen  */
+    volatile UINT32 obs_kbd;         /* transfer events matched to kbd    */
+    volatile UINT32 obs_mouse;       /* transfer events matched to mouse  */
+    volatile UINT32 obs_deq;         /* observer's current dequeue index  */
+    volatile UINT32 obs_cycle;       /* observer's current cycle bit      */
+    volatile UINT32 obs_last_type;   /* last event TRB type (field3>>6)   */
+    volatile UINT32 obs_last_cc;     /* last event completion code        */
+    volatile UINT32 obs_last_trb;    /* last event TRB address (low 32)   */
 } BRIDGE_DEBUG_REC;
 
 /* Producer-side: append one serial byte to the capture buffer. Called by

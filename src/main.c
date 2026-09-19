@@ -36,6 +36,12 @@ uefi_log_bridge_output(void)
           L"kbd_bytes=%u mouse_bytes=%u\n",
           head, tail, dbg->wrap, dbg->kbd_bytes, dbg->mouse_bytes);
 
+    Print(L"BRIDGE-DBG: observer: polls=%u events=%u kbd=%u mouse=%u "
+          L"deq=%u cycle=%u last_type=%u last_cc=%u last_trb=%08X\n",
+          dbg->obs_polls, dbg->obs_events, dbg->obs_kbd, dbg->obs_mouse,
+          dbg->obs_deq, dbg->obs_cycle, dbg->obs_last_type,
+          dbg->obs_last_cc, dbg->obs_last_trb);
+
     n = head - tail;
     if (n > BRIDGE_DEBUG_CAP)
         n = BRIDGE_DEBUG_CAP;
