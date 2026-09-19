@@ -262,16 +262,29 @@ uefi_bringup_highest_core(void)
         return EFI_SUCCESS;
     }
 
-    /* 3. Identify the BSP and pick the highest-numbered AP as the bridge
-     *    core. APIC IDs are not guaranteed contiguous, so we use the
+    /* 3. Identify the BSP and pick the highest-numbered ENABLED AP as the
+     *    bridge core. APIC IDs are not guaranteed contiguous, so we use the
      *    processor NUMBER (index into the MP Services enumeration), not a
-     *    raw APIC ID. */
+     *    raw APIC ID.
+     *
+     *    CRITICAL: StartupThisAP returns EFI_INVALID_PARAMETER if the
+     *    requested processor is the BSP or a DISABLED AP. We must therefore
+     *    skip any AP whose StatusFlag lacks PROCESSOR_ENABLED_BIT, and only
+     *    hand an enabled AP to StartupThisAP. */
     for (i = 0; i < num_processors; i++) {
         EFI_PROCESSOR_INFORMATION info;
         status = uefi_call_wrapper(
             mp->GetProcessorInfo, 3, mp, i, &info);
         if (EFI_ERROR(status))
             continue;
+
+#ifdef BRIDGE_DEBUG
+        Print(L"BRIDGE-DBG:   processor %d: StatusFlag=0x%x (BSP=%d, "
+              L"enabled=%d)\n",
+              i, info.StatusFlag,
+              (info.StatusFlag & PROCESSOR_AS_BSP_BIT) ? 1 : 0,
+              (info.StatusFlag & PROCESSOR_ENABLED_BIT) ? 1 : 0);
+#endif
 
         if (info.StatusFlag & PROCESSOR_AS_BSP_BIT) {
 #ifdef BRIDGE_DEBUG
@@ -280,7 +293,12 @@ uefi_bringup_highest_core(void)
             continue;
         }
 
-        /* Track the highest-numbered AP. */
+        /* Skip disabled APs: StartupThisAP rejects them with
+         * EFI_INVALID_PARAMETER. */
+        if (!(info.StatusFlag & PROCESSOR_ENABLED_BIT))
+            continue;
+
+        /* Track the highest-numbered enabled AP. */
         if (!found || i > highest_ap) {
             highest_ap = i;
             found = TRUE;
@@ -289,15 +307,17 @@ uefi_bringup_highest_core(void)
 
     if (!found) {
 #ifdef BRIDGE_DEBUG
-        Print(L"BRIDGE-DBG: no AP found (num_processors=%d)\n",
-              num_processors);
+        Print(L"BRIDGE-DBG: no ENABLED AP found (num_processors=%d, "
+              L"num_enabled=%d)\n",
+              num_processors, num_enabled);
 #endif
         return EFI_UNSUPPORTED;
     }
 
 #ifdef BRIDGE_DEBUG
-    Print(L"BRIDGE-DBG: MP Services: %d processors, BSP=%d, bridge AP=%d\n",
-          num_processors, bsp_number, highest_ap);
+    Print(L"BRIDGE-DBG: MP Services: %d processors (%d enabled), BSP=%d, "
+          L"bridge AP=%d\n",
+          num_processors, num_enabled, bsp_number, highest_ap);
 #endif
 
     /* 4. Allocate a stack for the bridge core in the reserved region. */
