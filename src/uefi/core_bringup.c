@@ -28,6 +28,8 @@
 
 #include "uefi.h"
 #include "../bridge/bridge.h"
+#include "../bridge/usb_topology.h"
+#include "../bridge/bridge_debug.h"
 
 /* ------------------------------------------------------------------ */
 /* EFI_MP_SERVICES_PROTOCOL (portability shim).                        */
@@ -206,11 +208,147 @@ bridge_ap_done_notify(EFI_EVENT event, VOID *context)
     (VOID)context;
 }
 
+/* ------------------------------------------------------------------ */
+/* AP detach from UEFI (bare-metal page tables + CR3 switch + CLI).    */
+/*                                                                     */
+/* The AP procedure launched via StartupThisAP() is structurally bound  */
+/* to the UEFI boot environment's lifecycle. When the BSP calls         */
+/* ExitBootServices(), the firmware forcibly aborts the AP driver,      */
+/* clears its processor state, and parks the core. To survive, the AP   */
+/* must detach from UEFI before ExitBootServices:                       */
+/*   1. Disable interrupts (CLI).                                       */
+/*   2. Build independent page tables mapping the regions the bridge    */
+/*      needs (the reserved region incl. VIRTUAL_PS2_BASE, the bridge   */
+/*      image/stack, and the XHCI MMIO).                                */
+/*   3. Switch CR3 to the new page tables.                              */
+/*   4. Enter an infinite loop (bridge_entry never returns).            */
+/*                                                                     */
+/* After this returns, the AP no longer uses UEFI's page tables, GDT,   */
+/* or interrupt services; it runs in its own bare-metal environment.    */
+/* ------------------------------------------------------------------ */
+
+/* x86-64 page-table entry bits. */
+#define AP_PT_PRESENT   (1ULL << 0)
+#define AP_PT_WRITABLE  (1ULL << 1)
+#define AP_PT_PS        (1ULL << 7)   /* 2 MiB large page */
+
+#define AP_PT_ENTRIES   512
+#define AP_PT_2MB       0x200000ULL   /* 2 MiB */
+
+/* Number of 2 MiB pages to map for the XHCI MMIO BAR (4 MiB total). */
+#define AP_XHCI_MAP_2MB 2
+
+/* Pre-allocated page-table pages (8 x 4 KiB, page-aligned via AllocatePages).
+ * Layout matches the x86-64 paging hierarchy:
+ *   pml4[0] -> pdpt_low ; pml4[3] -> pdpt_xhci (for the XHCI MMIO at
+ *   0xC000000000, PML4 index 3). */
+typedef struct {
+    UINT64 pml4[AP_PT_ENTRIES];      /* page 0 */
+    UINT64 pdpt_low[AP_PT_ENTRIES];  /* page 1 */
+    UINT64 pd_low[4][AP_PT_ENTRIES]; /* pages 2-5 (low 4 GB) */
+    UINT64 pdpt_xhci[AP_PT_ENTRIES]; /* page 6 */
+    UINT64 pd_xhci[AP_PT_ENTRIES];   /* page 7 */
+} AP_PAGE_TABLES;
+
+/* Map a 2 MiB-aligned physical address in the pre-allocated page tables. */
+static void
+ap_map_2mb(AP_PAGE_TABLES *pt, UINT64 phys)
+{
+    UINT64 pml4_idx = (phys >> 39) & 0x1FF;
+    UINT64 pdpt_idx = (phys >> 30) & 0x1FF;
+    UINT64 pd_idx   = (phys >> 21) & 0x1FF;
+    UINT64 *pdpt;
+    UINT64 *pd;
+
+    if (pml4_idx == 0) {
+        /* Low 4 GB: use the pre-allocated pdpt_low / pd_low pages. */
+        pdpt = pt->pdpt_low;
+        pd   = pt->pd_low[pdpt_idx];
+    } else {
+        /* Other regions (e.g. XHCI MMIO at 0xC000000000): use the
+         * pre-allocated pdpt_xhci / pd_xhci pages. */
+        pdpt = pt->pdpt_xhci;
+        pd   = pt->pd_xhci;
+    }
+
+    pt->pml4[pml4_idx] = (UINT64)(UINTN)pdpt | AP_PT_PRESENT | AP_PT_WRITABLE;
+    pdpt[pdpt_idx]     = (UINT64)(UINTN)pd   | AP_PT_PRESENT | AP_PT_WRITABLE;
+    pd[pd_idx]         = phys | AP_PT_PRESENT | AP_PT_WRITABLE | AP_PT_PS;
+}
+
+/* Detach the AP from UEFI: disable interrupts, build independent page
+ * tables, and switch CR3. Runs on the AP before bridge_entry(). */
+static void
+bridge_ap_detach(void)
+{
+    AP_PAGE_TABLES *pt;
+    EFI_STATUS status;
+    EFI_PHYSICAL_ADDRESS pt_addr = 0;
+    USB_TOPOLOGY *topo;
+    UINT64 xhci_base = 0;
+    UINT64 map_base;
+    UINT64 i;
+
+    /* 1. Disable interrupts. The bridge runs with interrupts off; it never
+     *    needs UEFI's timer/IRQ services after detaching, and disabling
+     *    interrupts prevents the AP from generating IRQs that could
+     *    interfere with the BSP's UEFI environment. */
+    __asm__ __volatile__("cli" : : : "memory");
+
+#ifdef BRIDGE_DEBUG
+    bridge_debug_puts((const CHAR8 *)"AP DETACH: disabling interrupts");
+#endif
+
+    /* 2. Allocate page-aligned memory for the independent page tables
+     *    (8 pages = 32 KiB). EfiReservedMemoryType so the OS never reclaims
+     *    them after ExitBootServices. */
+    status = uefi_call_wrapper(
+        BS->AllocatePages, 4, AllocateAnyPages, EfiReservedMemoryType,
+        8, &pt_addr);
+    if (EFI_ERROR(status)) {
+#ifdef BRIDGE_DEBUG
+        bridge_debug_puts((const CHAR8 *)"AP DETACH: AllocatePages failed");
+#endif
+        return;   /* Cannot detach; bridge_entry runs under UEFI's tables. */
+    }
+    pt = (AP_PAGE_TABLES *)(UINTN)pt_addr;
+
+    /* 3. Zero the page tables. */
+    for (i = 0; i < (sizeof(*pt) / sizeof(UINT64)); i++)
+        ((UINT64 *)pt)[i] = 0;
+
+    /* 4. Identity-map the low 4 GB using 2 MiB large pages. This covers the
+     *    reserved region (0x10000000..0x10000040, incl. VIRTUAL_PS2_BASE),
+     *    the bridge image, and the bridge stack. */
+    for (i = 0; i < (4ULL * 1024 * 1024 * 1024 / AP_PT_2MB); i++)
+        ap_map_2mb(pt, i * AP_PT_2MB);
+
+    /* 5. Map the XHCI MMIO region (from the recorded topology). */
+    topo = usb_topology_lookup();
+    if (topo != NULL)
+        xhci_base = topo->xhci_mmio_base;
+    if (xhci_base != 0) {
+        map_base = xhci_base & ~(AP_PT_2MB - 1);
+        for (i = 0; i < AP_XHCI_MAP_2MB; i++)
+            ap_map_2mb(pt, map_base + i * AP_PT_2MB);
+    }
+
+    /* 6. Switch CR3 to the new page tables. This flushes the TLB; the next
+     *    instruction fetch and data access use the independent tables. */
+    __asm__ __volatile__("movq %0, %%cr3" : : "r"((UINT64)(UINTN)pt)
+                         : "memory");
+
+#ifdef BRIDGE_DEBUG
+    bridge_debug_puts((const CHAR8 *)"AP DETACH: CR3 switched, detached");
+#endif
+}
+
 /* AP procedure.                                                       */
 /*                                                                     */
 /* Runs on the bridge core in its native environment (long mode, UEFI   */
 /* page tables/GDT/stack already set up by the firmware). Switches to   */
-/* the reserved-region bridge stack, signals the BSP, and calls         */
+/* the reserved-region bridge stack, signals the BSP, detaches from     */
+/* UEFI (independent page tables, CR3 switch, CLI), and calls           */
 /* bridge_entry() (B5).                                                 */
 /* ------------------------------------------------------------------ */
 static VOID EFIAPI
@@ -225,6 +363,11 @@ bridge_ap_entry(VOID *procedure_argument)
     if (g_bridge_stack_top != 0)
         __asm__ __volatile__("movq %0, %%rsp" : : "r"(g_bridge_stack_top)
                              : "memory");
+
+    /* Detach from UEFI: disable interrupts, build independent page tables,
+     * and switch CR3. The bridge then runs in its own bare-metal
+     * environment and survives ExitBootServices. */
+    bridge_ap_detach();
 
     /* Run the bridge. This never returns (bridge_entry loops forever). */
     bridge_entry();
