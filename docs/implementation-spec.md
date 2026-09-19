@@ -197,7 +197,8 @@ typedef struct {
 - **Poll-stage errors:** a non-success completion code is recorded (stage = poll) but
   does NOT halt the bridge — a transient error on one endpoint should not kill the
   whole bridge.
-- **Console readout (`src/uefi/l1_harness.c`):** after the bridge is SIPI-started, the
+- **Console readout (`src/uefi/l1_harness.c`):** after the bridge is started via
+  `EFI_MP_SERVICES_PROTOCOL`, the
   UEFI app calls `uefi_check_bridge_fault()`. It waits (bounded) for the bridge to
   publish its fault record, and if the record's magic is set, prints a compact,
   human-readable diagnosis to the UEFI console (ConOut) and halts — it never boots the
@@ -236,8 +237,8 @@ typedef struct {
     handoff and the BSP harness being gone; (2) **OS-independent** — the bridge just
     writes bytes, any OS can read them; (3) **no console-driver dependency** — plain
     memory stores to a fixed address, avoiding the page-table / firmware-driver concerns
-    of calling `ConOut->OutputString` from the AP (whose page tables only identity-map
-    the low 4 GB, and whose console driver code may live above 4 GB); (4) **reuses the
+    of calling `ConOut->OutputString` from the AP (which runs on the firmware's page
+    tables, and whose console driver code may live above 4 GB); (4) **reuses the
     established pattern** — the same fixed-address shared-memory mechanism as the
     virtual 8042 port.
   - **Layout:** a fixed ring buffer of NUL-terminated diagnostic lines at a new address
@@ -507,8 +508,9 @@ EFI_STATUS uefi_discover_usb(void);
 
 ### 4.2 U2 — Highest-core bring-up (`src/uefi/core_bringup.c`)
 
-**Responsibility:** Determine core count; set up the highest core's GDT/stack/page
-tables; start it via SIPI, loading the bridge code.
+**Responsibility:** Determine core count; start the highest AP via the UEFI
+`EFI_MP_SERVICES_PROTOCOL` (`StartupThisAP`), which wakes it in its native
+long-mode environment and runs the bridge entry.
 
 **Public interface (already in `src/uefi/uefi.h`):**
 ```c
@@ -516,18 +518,22 @@ EFI_STATUS uefi_bringup_highest_core(void);
 ```
 
 **Required implementation steps:**
-1. **Determine core count:** CPUID leaf 0xB (x2APIC topology) or the ACPI MADT table.
-   Pick the highest-numbered core as the bridge core.
-2. **Set up the bridge core's environment:**
-   - GDT (flat 64-bit code/data segments).
-   - Stack (allocate in the reserved region).
-   - Page tables (identity-map the reserved region + XHCI MMIO).
-3. **Load the bridge code** into the reserved region (the bridge code is linked into
-   the same UEFI image; copy it to the reserved region).
-4. **Start the core via SIPI:**
-   - Send INIT IPI (vector 0xC4500) then STARTUP IPI (0xC4600 + MPN_VECT), per the
-     reference OS's `MultiProc.HC` conventions.
-   - The AP starts executing the bridge entry (`bridge_entry`, B5) in its own context.
+1. **Locate `EFI_MP_SERVICES_PROTOCOL`** via `BS->LocateProtocol`. Because this
+   application runs inside the UEFI environment (before `ExitBootServices`), we
+   MUST NOT issue manual INIT-SIPI-SIPI sequences. The firmware abstracts the
+   underlying architecture: it wakes the AP in its native environment (already in
+   long mode, with UEFI's page tables, GDT, and stack set up) and runs a plain C
+   function on it.
+2. **Enumerate processors:** `GetNumberOfProcessors`, then `GetProcessorInfo` for
+   each to identify the BSP (`PROCESSOR_AS_BSP_BIT`) and pick the highest-numbered
+   AP as the bridge core. Use the processor NUMBER (MP Services index), not a raw
+   APIC ID (APIC IDs are not guaranteed contiguous).
+3. **Allocate the bridge stack** in the reserved region (survives
+   `ExitBootServices`; the firmware-provided AP stack may be reclaimed).
+4. **Start the highest AP via `StartupThisAP`**, passing the AP procedure
+   `bridge_ap_entry` (an `EFIAPI` function that switches to the reserved-region
+   bridge stack, sets `g_ap_booted`, and calls `bridge_entry`, B5). Use a finite
+   timeout so the BSP can detect a failed bring-up.
 5. **Load the input adapter** into the reserved region on core 0 (for O1).
 
 ### 4.3 U3 — Memory reservation (`src/uefi/mem_reserve.c`)
@@ -730,8 +736,9 @@ The implementation is complete when:
    correctness, virtual IRQ emission, HID→PS/2 translation, make/break, 0xE0 extended,
    mouse packets). ✅ **DONE** — 133 assertions pass.
 3. **Layer 1 passes (QEMU + real hardware):** the UEFI app enumerates USB kbd/mouse,
-   reserves memory, SIPI-starts the highest core, and the harness on core 0 reads the
-   virtual port region and asserts the PS/2 byte stream — with **no OS loaded**.
+   reserves memory, starts the highest core via `EFI_MP_SERVICES_PROTOCOL`, and the
+   harness on core 0 reads the virtual port region and asserts the PS/2 byte stream —
+   with **no OS loaded**.
    - ✅ **UEFI setup phase PASSED on real hardware** (Toshiba Satellite P50, 2026-09-17):
      verify XHCI, discover real kbd/mouse, reserve memory, scaffold bring-up, handoff.
      See architecture.md §9.2 for the trace and the two real-HW bugs fixed.

@@ -19,7 +19,8 @@ EFI_STATUS uefi_discover_usb(void);
 /* U3: Allocate + reserve the bridge, virtual port, and topology regions. */
 EFI_STATUS uefi_reserve_memory(void);
 
-/* U2: Bring up the highest core via SIPI, loading the bridge code. */
+/* U2: Bring up the highest core via EFI_MP_SERVICES_PROTOCOL, loading the
+ * bridge code. */
 EFI_STATUS uefi_bringup_highest_core(void);
 
 /* Layer 1 harness: after bridge bring-up, check the XHCI fault record. If the

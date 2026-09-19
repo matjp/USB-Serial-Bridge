@@ -115,8 +115,9 @@ flowchart LR
   - No firmware modification (no SPI reflash).
   - No SMM driver — SMRAM is locked on locked-down systems, so SMM is unusable.
   - No hypervisor — VT-x/AMD-V may be disabled, and it is the heaviest option.
-  - Multi-core x86 is **universal** on modern PCs. Starting the highest core via SIPI
-    is a standard CPU operation that firmware locking cannot prevent.
+  - Multi-core x86 is **universal** on modern PCs. Starting the highest core via the
+    UEFI `EFI_MP_SERVICES_PROTOCOL` (or, after `ExitBootServices`, raw SIPI) is a
+    standard CPU operation that firmware locking cannot prevent.
   - Secure Boot only affects *loading* the UEFI setup app (sign/enroll a key). The
     bridge itself runs after `ExitBootServices` and is not subject to Secure Boot.
   - XHCI ≥ 1.0 is **universal** on modern PCs (all USB 3.x controllers are XHCI 1.0+),
@@ -373,7 +374,7 @@ bridge's virtual IRQ) do the read. The OS source is otherwise untouched.
 | Module | Responsibility | Relative size |
 |--------|----------------|---------------|
 | **U1. USB topology discovery** | Verify host controller is XHCI ≥ 1.0 (C6); use UEFI USB stack to find kbd+mouse, record endpoints | Small |
-| **U2. Highest-core bring-up** | Determine core count (CPUID leaf 0xB / ACPI MADT); set up the highest core's GDT, stack, page tables; start it via SIPI, loading the bridge code | Small |
+| **U2. Highest-core bring-up** | Determine core count; start the highest AP via the UEFI `EFI_MP_SERVICES_PROTOCOL` (`StartupThisAP`), which wakes it in its native long-mode environment and runs the bridge entry | Small |
 | **U3. Memory reservation** | Allocate bridge + virtual port region, mark reserved in EFI memory map | Tiny |
 
 ---
@@ -390,7 +391,7 @@ sequenceDiagram
     APP->>APP: Enumerate USB kbd and mouse
     APP->>APP: Allocate bridge and virtual port region
     APP->>APP: Mark memory reserved
-    APP->>CN: SIPI start highest core
+    APP->>CN: MP Services StartupThisAP (start highest core)
     APP->>CN: Load bridge code
     APP->>C0: ExitBootServices
     APP->>C0: Boot OS
@@ -411,7 +412,7 @@ sequenceDiagram
 |------|---------------------------|
 | OS overwrites bridge/virtual-port RAM | Mark region `EFI_RESERVED_MEMORY_TYPE` **and** carve it out of the memory map the OS collects (e.g. E820 for TempleOS). Place bridge/virtual-port region above the OS's physical memory space so it never allocates over it |
 | OS main thread uses the bridge core | The bridge **TDM-shares** the highest core with the OS's background task there — no need to exclude the core from the OS's core count. The main thread stays on core 0 and never runs on the bridge core |
-| Highest-core bring-up fails | **Verify** SIPI sequence, GDT/stack/page tables for the AP; test in QEMU with multiple cores |
+| Highest-core bring-up fails | **Verify** the `EFI_MP_SERVICES_PROTOCOL` lookup, processor enumeration, and `StartupThisAP`; test in QEMU with multiple cores |
 | XHCI periodic-IN without runtime enumeration | Enumerate once via UEFI (Phase 1); **verify** endpoint addresses remain valid after `ExitBootServices` |
 | Secure Boot blocks UEFI app | Sign the app or enroll a key (deployment concern, not architectural) |
 | Target lacks XHCI ≥ 1.0 | **Hard requirement (C6):** only XHCI ≥ 1.0 is supported. Verify the controller's spec version (XHCI `HCSPARAMS1`/`HCCPARAMS`, or the UEFI `EFI_USB2_HC_PROTOCOL` revision) at boot; abort cleanly if not XHCI ≥ 1.0. No EHCI/UHCI/OHCI fallback |
@@ -486,8 +487,8 @@ design is proven before it.
 
 **Layer 1 — UEFI app + bridge (no OS):**
 - **QEMU/OVMF:** boot the UEFI setup app under OVMF. It enumerates the USB kbd/mouse,
-  allocates and marks the bridge + virtual port region reserved, and SIPI-starts the
-  highest core with the bridge code.
+  allocates and marks the bridge + virtual port region reserved, and starts the
+  highest core with the bridge code via `EFI_MP_SERVICES_PROTOCOL`.
 - **OS-free validation:** instead of booting an OS, the app (or a tiny test harness on
   core 0) reads the virtual port region and prints/asserts the received PS/2 byte
   stream. This proves the full USB → XHCI → HID → PS/2 → virtual port path end-to-end,

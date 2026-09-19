@@ -1,21 +1,24 @@
 /*
- * core_bringup.c - U2: Highest-core bring-up via SIPI.
+ * core_bringup.c - U2: Highest-core bring-up via EFI_MP_SERVICES_PROTOCOL.
  *
- * Determines the core count (CPUID leaf 0xB / ACPI MADT), picks the
- * highest-numbered core as the bridge core, sets up its GDT, stack, and page
- * tables, loads the bridge code, and starts it via SIPI.
+ * Determines the core count, picks the highest-numbered AP as the bridge
+ * core, allocates its stack in the reserved region, and starts it via the
+ * UEFI MP Services protocol (StartupThisAP).
  *
- * The AP wakes in 16-bit real mode at the STARTUP vector. A small real-mode
- * trampoline (copied to a low fixed address) switches the AP to 64-bit long
- * mode - loading a flat GDT, enabling PAE, loading CR3 with an identity-map
- * page table, setting EFER.LME, and far-jumping to a 64-bit stub that loads
- * the bridge stack and calls bridge_entry() (B5).
+ * Because this application runs INSIDE the UEFI environment (before
+ * ExitBootServices), we MUST NOT issue manual INIT-SIPI-SIPI sequences.
+ * The firmware's EFI_MP_SERVICES_PROTOCOL abstracts the underlying
+ * architecture completely: it wakes the AP in its native environment
+ * (already in long mode, with UEFI's page tables, GDT, and stack set up)
+ * and executes a plain C function of our choice on it. This eliminates the
+ * entire class of boot-loop bugs that plague hand-rolled trampolines
+ * (real-mode trampoline, identity-mapped page tables, flat GDT, APIC
+ * INIT-SIPI-SIPI timing, APIC ID targeting).
  *
- * The page tables identity-map the low 4 GB with 2 MB pages. This covers the
- * UEFI image (where the bridge code and its static data live), the reserved
- * region (bridge stack, USB_TOPOLOGY), the XHCI MMIO, and the virtual 8042
- * port region (0x10000000). The bridge runs in place from the image; the
- * copy-to-reserved-region step is deferred to the production handoff.
+ * The AP procedure (bridge_ap_entry) switches to the reserved-region bridge
+ * stack and calls bridge_entry() (B5). The bridge runs in place from the
+ * UEFI image; the copy-to-reserved-region step is deferred to the production
+ * handoff.
  *
  * See docs/architecture.md section 7.3, module U2.
  */
@@ -24,404 +27,140 @@
 #include <efilib.h>
 
 #include "uefi.h"
-#include "../bridge/usb_topology.h"
+#include "../bridge/bridge.h"
 
 /* ------------------------------------------------------------------ */
-/* Constants (standard x86 APIC multiprocessor conventions).           */
+/* Bridge core state.                                                  */
 /* ------------------------------------------------------------------ */
-
-/* INIT IPI delivery mode (level assert) and STARTUP IPI delivery mode,
- * per the standard x86 multiprocessor startup convention. */
-#define ICR_INIT_LEVEL_ASSERT  0x0000C500
-#define ICR_STARTUP            0x00000600
-
-/* Real-mode address where the AP trampoline is copied and executed. The
- * STARTUP IPI vector is the page number of this address. This is NOT a
- * hardcoded constant: a fixed low address like 0x8000 may already be
- * occupied by UEFI firmware data on real hardware, so we find a genuinely
- * free page below 1 MB from the EFI memory map at runtime (see
- * find_trampoline_addr). 0x8000 is only the fallback default. */
-static UINT32 g_trampoline_addr = 0x8000;
 
 /* Bridge core stack size (bytes), allocated in the reserved region. */
 #define BRIDGE_STACK_SIZE      0x4000   /* 16 KiB */
 
-/* GDT selectors (flat 64-bit segments). */
-#define GDT_CODE_SEL           0x08
-#define GDT_DATA_SEL           0x10
-
-/* ------------------------------------------------------------------ */
-/* Page tables: identity-map the low 4 GB with 2 MB pages.             */
-/*                                                                     */
-/* PML4[0] -> PDPT; PDPT[0..3] -> four 512-entry blocks of the PD;     */
-/* each PD entry is a 2 MB page (PS=1) covering 0..4 GB.               */
-/* ------------------------------------------------------------------ */
-#define PD_ENTRIES  2048   /* 4 GB / 2 MB */
-static UINT64 g_pml4[512] __attribute__((aligned(4096)));
-static UINT64 g_pdpt[512] __attribute__((aligned(4096)));
-static UINT64 g_pd[PD_ENTRIES] __attribute__((aligned(4096)));
-
-/* Flat 64-bit GDT: null, code, data. */
-static UINT64 g_gdt[3] __attribute__((aligned(8)));
-
-/* Bridge stack top (set before SIPI; read by the 64-bit AP stub).
- * Global (not static) so the naked asm's RIP-relative reference resolves to a
- * normal data-section relocation rather than one against a local symbol. */
+/* Bridge stack top (set before the AP is started; read by the AP procedure
+ * to switch to the reserved-region bridge stack). Global (not static) so the
+ * AP procedure's reference resolves to a normal data-section relocation. */
 UINT64 g_bridge_stack_top;
 
-/* Boot-status flag: set to 1 by the AP as its very first action in 64-bit
- * long mode, so the BSP can verify the AP actually booted (per the standard
- * INIT-SIPI-SIPI handshake). Global (not static) so the naked asm's
- * RIP-relative reference resolves to a normal data-section relocation. */
+/* Boot-status flag: set to 1 by the AP procedure as its very first action,
+ * so the BSP can verify the AP actually started and reached the bridge
+ * entry. Global (not static) so the AP procedure's reference resolves to a
+ * normal data-section relocation. */
 volatile UINT8 g_ap_booted = 0;
 
-/* 64-bit AP entry stub (defined below). Forward-declared so install_trampoline
- * can take its address to patch the trampoline's far-jump target. */
-__attribute__((naked)) static void ap_entry64(void);
-
 /* ------------------------------------------------------------------ */
-/* Real-mode AP trampoline (16-bit machine code) + its data area.      */
+/* AP procedure.                                                       */
 /*                                                                     */
-/* The trampoline is copied to TRAMPOLINE_ADDR and patched with the    */
-/* GDT pointer, CR3 (PML4 base), and the 64-bit entry point. Layout:   */
-/*                                                                     */
-/*   code  : TRAMPOLINE_CODE_LEN bytes of 16-bit code                  */
-/*   +0x3F : gdt_ptr  (6 bytes: limit + base)                          */
-/*   +0x45 : cr3_val  (8 bytes: PML4 base, low 32 bits used)           */
-/*   +0x4D : entry64  (8 bytes: 64-bit entry point, low 32 bits used)  */
-/*                                                                     */
-/* The code runs in 16-bit real mode (default operand size 16-bit), so */
-/* every 32-bit operand instruction carries the 0x66 operand-size      */
-/* override prefix. Without it, e.g. `mov ecx, imm32` (0xB9) would be  */
-/* decoded as `mov cx, imm16` (3 bytes) and the extra immediate bytes  */
-/* would shift the whole instruction stream -> garbage execution.      */
-/*                                                                     */
-/*   cli                                                               */
-/*   mov ax, cs ; mov ds, ax   (DS = CS so the DS-relative lgdt and    */
-/*                              mov eax,[cr3_val] resolve to the       */
-/*                              trampoline's own data area; after SIPI  */
-/*                              DS is 0, so without this the lgdt would */
-/*                              read from physical 0x0037, not 0x8037) */
-/*   lgdt [gdt_ptr]                                                    */
-/*   mov eax, cr4 ; or eax, 0x20 (PAE) ; mov cr4, eax                  */
-/*   mov eax, [cr3_val] ; mov cr3, eax                                 */
-/*   mov ecx, 0xC0000080 (EFER) ; rdmsr ; or eax, 0x100 (LME) ; wrmsr  */
-/*   mov eax, cr0 ; or eax, 0x80000001 (PG|PE) ; mov cr0, eax          */
-/*   jmp 0x08:entry64   (far jump into 64-bit code)                    */
+/* Runs on the bridge core in its native environment (long mode, UEFI   */
+/* page tables/GDT/stack already set up by the firmware). Switches to   */
+/* the reserved-region bridge stack, signals the BSP, and calls         */
+/* bridge_entry() (B5).                                                 */
 /* ------------------------------------------------------------------ */
-#define TRAMPOLINE_CODE_LEN  0x3F
-#define TRAMP_GDT_PTR_OFF    0x3F
-#define TRAMP_CR3_OFF        0x45
-#define TRAMP_ENTRY64_OFF    0x4D
-#define TRAMP_LGDT_DISP      0x08   /* disp16 of the lgdt operand */
-#define TRAMP_CR3_DISP       0x16   /* moffs16 of mov eax,[cr3_val] */
-#define TRAMP_FARJMP_OFF     0x39   /* off32 of the far jump */
-
-static const UINT8 g_trampoline_code[TRAMPOLINE_CODE_LEN] = {
-    0xFA,                                        /* cli */
-    0x8C, 0xC8,                                  /* mov ax, cs */
-    0x8E, 0xD8,                                  /* mov ds, ax */
-    0x0F, 0x01, 0x16, 0x00, 0x00,                /* lgdt [gdt_ptr] */
-    0x0F, 0x20, 0xE0,                            /* mov eax, cr4 */
-    0x66, 0x83, 0xC8, 0x20,                      /* or eax, 0x20 (PAE) */
-    0x0F, 0x22, 0xE0,                            /* mov cr4, eax */
-    0x66, 0xA1, 0x00, 0x00,                      /* mov eax, [cr3_val] */
-    0x0F, 0x22, 0xD8,                            /* mov cr3, eax */
-    0x66, 0xB9, 0x80, 0x00, 0x00, 0xC0,          /* mov ecx, 0xC0000080 */
-    0x0F, 0x32,                                  /* rdmsr */
-    0x66, 0x0D, 0x00, 0x01, 0x00, 0x00,          /* or eax, 0x100 (LME) */
-    0x0F, 0x30,                                  /* wrmsr */
-    0x0F, 0x20, 0xC0,                            /* mov eax, cr0 */
-    0x66, 0x0D, 0x01, 0x00, 0x00, 0x80,          /* or eax, 0x80000001 */
-    0x0F, 0x22, 0xC0,                            /* mov cr0, eax */
-    0x66, 0xEA, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00  /* jmp 0x08:entry64 */
-};
-
-/* ------------------------------------------------------------------ */
-/* CPUID helpers.                                                      */
-/* ------------------------------------------------------------------ */
-
-/* Return the maximum basic CPUID leaf. */
-static UINT32
-cpuid_max_leaf(void)
+static VOID EFIAPI
+bridge_ap_entry(VOID *procedure_argument)
 {
-    UINT32 eax, ebx, ecx, edx;
-    __asm__ __volatile__(
-        "cpuid"
-        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-        : "a"(0)
-        : "memory");
-    return eax;
-}
+    /* Signal the BSP: the AP is running. */
+    g_ap_booted = 1;
 
-/* CPUID leaf 0xB (x2APIC topology): returns the number of logical
- * processors (EBX bits 15:0 of sub-leaf 0). Returns 0 if leaf 0xB is not
- * supported. */
-static UINT32
-cpuid_max_logical_processors(void)
-{
-    UINT32 eax, ebx, ecx, edx;
+    /* Switch to the reserved-region bridge stack. The firmware-provided
+     * stack may be reclaimed after ExitBootServices, but the bridge runs
+     * persistently, so it needs its own stack in the reserved region. */
+    if (g_bridge_stack_top != 0)
+        __asm__ __volatile__("movq %0, %%rsp" : : "r"(g_bridge_stack_top)
+                             : "memory");
 
-    if (cpuid_max_leaf() < 0x0B)
-        return 0;
+    /* Run the bridge. This never returns (bridge_entry loops forever). */
+    bridge_entry();
 
-    __asm__ __volatile__(
-        "cpuid"
-        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-        : "a"(0x0B), "c"(0)
-        : "memory");
-    return ebx & 0xFFFF;
+    /* Not reached. */
+    (VOID)procedure_argument;
 }
 
 /* ------------------------------------------------------------------ */
-/* Local APIC helpers.                                                 */
-/* ------------------------------------------------------------------ */
-
-/* Write to the local APIC ICR (interrupt command register) to send an IPI.
- * The local APIC is memory-mapped at the standard base 0xFEE00000. */
-static void
-lapic_write(UINT32 offset, UINT32 value)
-{
-    volatile UINT32 *lapic = (volatile UINT32 *)0xFEE00000ULL;
-    lapic[offset / 4] = value;
-}
-
-/* Send an INIT IPI to the given APIC ID.
- *
- * The local APIC ICR is a 64-bit register split into two 32-bit halves:
- *   - ICR high (0x310): the destination field (APIC ID, bits 56-63).
- *   - ICR low  (0x300): the command (delivery mode, trigger, level, vector).
- * Writing the low half triggers the send. So the destination is written to
- * 0x310 FIRST, then the command to 0x300. (Writing the command bits into
- * 0x310 instead is a no-op - the low half is never written, so no IPI is
- * ever sent.) */
-static void
-send_init_ipi(UINT32 apic_id)
-{
-    /* ICR high: destination APIC ID. */
-    lapic_write(0x310, apic_id << 24);
-    /* ICR low: delivery mode 101 (INIT), level assert, trigger level. */
-    lapic_write(0x300, ICR_INIT_LEVEL_ASSERT);
-}
-
-/* Send a STARTUP IPI to the given APIC ID with the given vector. */
-static void
-send_startup_ipi(UINT32 apic_id, UINT32 vector)
-{
-    /* ICR high: destination APIC ID. */
-    lapic_write(0x310, apic_id << 24);
-    /* ICR low: delivery mode 110 (STARTUP), vector. */
-    lapic_write(0x300, ICR_STARTUP | (vector & 0xFF));
-}
-
-/* ------------------------------------------------------------------ */
-/* Bridge core environment setup.                                      */
-/* ------------------------------------------------------------------ */
-
-/* Build the identity-map page tables (low 4 GB, 2 MB pages). */
-static void
-setup_page_tables(void)
-{
-    UINTN i;
-
-    for (i = 0; i < 512; i++) {
-        g_pml4[i] = 0;
-        g_pdpt[i] = 0;
-    }
-    for (i = 0; i < PD_ENTRIES; i++)
-        g_pd[i] = 0;
-
-    /* PML4[0] -> PDPT. */
-    g_pml4[0] = (UINT64)(UINTN)g_pdpt | 0x3;   /* present + writable */
-
-    /* PDPT[0..3] -> four 512-entry blocks of the PD (each covers 1 GB). */
-    for (i = 0; i < 4; i++)
-        g_pdpt[i] = (UINT64)(UINTN)(g_pd + i * 512) | 0x3;
-
-    /* PD entries: 2 MB pages, present + writable + PS. */
-    for (i = 0; i < PD_ENTRIES; i++)
-        g_pd[i] = ((UINT64)i << 21) | 0x83;
-}
-
-/* Build the flat 64-bit GDT. */
-static void
-setup_gdt(void)
-{
-    g_gdt[0] = 0;                              /* null descriptor */
-    g_gdt[1] = 0x00AF9A000000FFFFULL;          /* 64-bit code, DPL0 */
-    g_gdt[2] = 0x00AF92000000FFFFULL;          /* 64-bit data, DPL0 */
-}
-
-/* Write a little-endian 16-bit value. */
-static void
-put_le16(UINT8 *p, UINT16 v)
-{
-    p[0] = (UINT8)(v & 0xFF);
-    p[1] = (UINT8)((v >> 8) & 0xFF);
-}
-
-/* Write a little-endian 32-bit value. */
-static void
-put_le32(UINT8 *p, UINT32 v)
-{
-    p[0] = (UINT8)(v & 0xFF);
-    p[1] = (UINT8)((v >> 8) & 0xFF);
-    p[2] = (UINT8)((v >> 16) & 0xFF);
-    p[3] = (UINT8)((v >> 24) & 0xFF);
-}
-
-/* Copy the trampoline to TRAMPOLINE_ADDR and patch its data area and
- * immediates with the GDT pointer, CR3 (PML4 base), and 64-bit entry. */
-static void
-install_trampoline(UINT32 trampoline_addr)
-{
-    UINT8 *tramp = (UINT8 *)(UINTN)trampoline_addr;
-    UINT64 gdt_base = (UINT64)(UINTN)g_gdt;
-    UINT16 gdt_limit = (UINT16)(sizeof(g_gdt) - 1);
-    UINT64 cr3 = (UINT64)(UINTN)g_pml4;
-    UINT64 entry = (UINT64)(UINTN)ap_entry64;
-    UINTN i;
-
-    /* Copy the code. */
-    for (i = 0; i < TRAMPOLINE_CODE_LEN; i++)
-        tramp[i] = g_trampoline_code[i];
-
-    /* Patch the GDT pointer (limit + base) in the data area. */
-    put_le16(tramp + TRAMP_GDT_PTR_OFF, gdt_limit);
-    put_le32(tramp + TRAMP_GDT_PTR_OFF + 2, (UINT32)gdt_base);
-
-    /* Patch the lgdt disp16 to point at the GDT pointer. */
-    put_le16(tramp + TRAMP_LGDT_DISP, TRAMP_GDT_PTR_OFF);
-
-    /* Patch the CR3 value (PML4 base, low 32 bits) in the data area. */
-    put_le32(tramp + TRAMP_CR3_OFF, (UINT32)cr3);
-
-    /* Patch the mov eax,[cr3_val] disp16 to point at the CR3 value. */
-    put_le16(tramp + TRAMP_CR3_DISP, TRAMP_CR3_OFF);
-
-    /* Patch the far-jump offset (64-bit entry point, low 32 bits). The
-     * selector 0x08 is already in the code. */
-    put_le32(tramp + TRAMP_FARJMP_OFF, (UINT32)entry);
-
-    /* Ensure the writes are visible to the AP before SIPI. */
-    __asm__ __volatile__("" ::: "memory");
-}
-
-/* ------------------------------------------------------------------ */
-/* 64-bit AP entry stub.                                               */
-/*                                                                     */
-/* Runs in long mode after the trampoline's far jump. Loads the flat   */
-/* data segments and the bridge stack, then calls bridge_entry() (B5). */
-/* ------------------------------------------------------------------ */
-__attribute__((naked)) static void
-ap_entry64(void)
-{
-    __asm__ __volatile__(
-        "movb $1, g_ap_booted(%%rip)\n\t"     /* signal BSP: in 64-bit mode */
-        "movw $0x10, %%ax\n\t"                 /* data selector */
-        "movw %%ax, %%ds\n\t"
-        "movw %%ax, %%es\n\t"
-        "movw %%ax, %%ss\n\t"
-        "movq g_bridge_stack_top(%%rip), %%rsp\n\t"
-        "call bridge_entry\n\t"
-        "1:\n\t"
-        "hlt\n\t"
-        "jmp 1b\n\t"
-        ::: "memory");
-}
-
-/* Find a free, page-aligned physical address below 1 MB for the AP
- * trampoline, by walking the EFI memory map for a conventional-memory
- * (usable RAM) region in the safe real-mode range [0x8000, 0x9F000).
- * The STARTUP IPI vector can only address the first 1 MB, and a hardcoded
- * low address may collide with UEFI firmware data, so we pick a genuinely
- * free page. Returns 0 if none is found (caller falls back to 0x8000). */
-static UINT32
-find_trampoline_addr(void)
-{
-    EFI_STATUS status;
-    UINTN map_size = 0;
-    UINTN map_key = 0;
-    UINTN desc_size = 0;
-    UINT32 desc_version = 0;
-    EFI_MEMORY_DESCRIPTOR *map = NULL;
-    EFI_MEMORY_DESCRIPTOR *desc;
-    UINTN count, i;
-    UINT64 start, end, aligned;
-    UINT32 addr = 0;
-
-    /* First call returns the required buffer size. */
-    status = uefi_call_wrapper(
-        BS->GetMemoryMap, 5, &map_size, NULL, &map_key, &desc_size, &desc_version);
-    if (status != EFI_BUFFER_TOO_SMALL)
-        return 0;
-
-    /* Allocate a scratch buffer for the map. */
-    map_size += desc_size * 4;
-    status = uefi_call_wrapper(BS->AllocatePool, 2, EfiBootServicesData, map_size,
-                               (VOID **)&map);
-    if (EFI_ERROR(status))
-        return 0;
-
-    status = uefi_call_wrapper(
-        BS->GetMemoryMap, 5, &map_size, map, &map_key, &desc_size, &desc_version);
-    if (EFI_ERROR(status)) {
-        FreePool(map);
-        return 0;
-    }
-
-    /* Find the first conventional-memory page in the safe range. */
-    count = map_size / desc_size;
-    for (i = 0; i < count; i++) {
-        desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)map + i * desc_size);
-        if (desc->Type != EfiConventionalMemory)
-            continue;
-
-        start = desc->PhysicalStart;
-        end = start + (desc->NumberOfPages << 12);
-
-        /* Clip to the safe real-mode range [0x8000, 0x9F000). */
-        if (end <= 0x8000ULL || start >= 0x9F000ULL)
-            continue;
-        if (start < 0x8000ULL)
-            start = 0x8000ULL;
-        if (end > 0x9F000ULL)
-            end = 0x9F000ULL;
-
-        /* Page-align the start; require a full free page. */
-        aligned = (start + 0xFFF) & ~0xFFFULL;
-        if (aligned + 0x1000 <= end) {
-            addr = (UINT32)aligned;
-            break;
-        }
-    }
-
-    FreePool(map);
-    return addr;
-}
-
-/* ------------------------------------------------------------------ */
-/* uefi_bringup_highest_core(): determine core count, set up the        */
-/* highest core's GDT/stack/page tables, load the bridge code, and      */
-/* start the core via SIPI.                                             */
+/* uefi_bringup_highest_core(): determine core count, allocate the      */
+/* bridge stack, and start the highest AP via EFI_MP_SERVICES_PROTOCOL. */
 /* ------------------------------------------------------------------ */
 EFI_STATUS
 uefi_bringup_highest_core(void)
 {
-    UINT32 core_count;
-    UINT32 highest_core;
-    EFI_PHYSICAL_ADDRESS stack_addr = 0;
+    EFI_MP_SERVICES_PROTOCOL *mp = NULL;
+    EFI_GUID mp_guid = EFI_MP_SERVICES_PROTOCOL_GUID;
     EFI_STATUS status;
+    UINTN num_processors = 0;
+    UINTN num_enabled = 0;
+#ifdef BRIDGE_DEBUG
+    UINTN bsp_number = 0;
+#endif
+    UINTN highest_ap = 0;
+    UINTN i;
+    EFI_PHYSICAL_ADDRESS stack_addr = 0;
+    BOOLEAN found = FALSE;
 
-    /* 1. Determine the core count (CPUID leaf 0xB). */
-    core_count = cpuid_max_logical_processors();
-    if (core_count == 0)
-        core_count = 1;   /* fallback: assume at least one core */
+    /* 1. Locate the MP Services protocol. This is the firmware-sanctioned
+     *    way to start APs while still inside the UEFI environment. */
+    status = uefi_call_wrapper(
+        BS->LocateProtocol, 3, &mp_guid, NULL, (VOID **)&mp);
+    if (EFI_ERROR(status) || mp == NULL) {
+#ifdef BRIDGE_DEBUG
+        Print(L"BRIDGE-DBG: EFI_MP_SERVICES_PROTOCOL not found (status=%r)\n",
+              status);
+#endif
+        return EFI_UNSUPPORTED;
+    }
 
-    /* 2. Pick the highest-numbered core as the bridge core. */
-    highest_core = core_count - 1;
+    /* 2. Get the number of processors. */
+    status = uefi_call_wrapper(
+        mp->GetNumberOfProcessors, 3, mp, &num_processors, &num_enabled);
+    if (EFI_ERROR(status))
+        return status;
 
-    /* 3. Allocate a stack for the bridge core in the reserved region. */
+    if (num_processors < 2) {
+        /* Single-core system: no AP to bring up. */
+#ifdef BRIDGE_DEBUG
+        Print(L"BRIDGE-DBG: only %d processor(s); no AP to start\n",
+              num_processors);
+#endif
+        return EFI_SUCCESS;
+    }
+
+    /* 3. Identify the BSP and pick the highest-numbered AP as the bridge
+     *    core. APIC IDs are not guaranteed contiguous, so we use the
+     *    processor NUMBER (index into the MP Services enumeration), not a
+     *    raw APIC ID. */
+    for (i = 0; i < num_processors; i++) {
+        EFI_PROCESSOR_INFORMATION info;
+        status = uefi_call_wrapper(
+            mp->GetProcessorInfo, 3, mp, i, &info);
+        if (EFI_ERROR(status))
+            continue;
+
+        if (info.StatusFlag & PROCESSOR_AS_BSP_BIT) {
+#ifdef BRIDGE_DEBUG
+            bsp_number = i;
+#endif
+            continue;
+        }
+
+        /* Track the highest-numbered AP. */
+        if (!found || i > highest_ap) {
+            highest_ap = i;
+            found = TRUE;
+        }
+    }
+
+    if (!found) {
+#ifdef BRIDGE_DEBUG
+        Print(L"BRIDGE-DBG: no AP found (num_processors=%d)\n",
+              num_processors);
+#endif
+        return EFI_UNSUPPORTED;
+    }
+
+#ifdef BRIDGE_DEBUG
+    Print(L"BRIDGE-DBG: MP Services: %d processors, BSP=%d, bridge AP=%d\n",
+          num_processors, bsp_number, highest_ap);
+#endif
+
+    /* 4. Allocate a stack for the bridge core in the reserved region. */
     status = uefi_call_wrapper(
         BS->AllocatePages, 4, AllocateAnyPages, EfiReservedMemoryType,
         BRIDGE_STACK_SIZE / 4096, &stack_addr);
@@ -429,84 +168,33 @@ uefi_bringup_highest_core(void)
         return status;
     g_bridge_stack_top = stack_addr + BRIDGE_STACK_SIZE;
 
-    /* 4. Set up the bridge core's environment: page tables + GDT. */
-    setup_page_tables();
-    setup_gdt();
-
-    /* 5. Find a free page below 1 MB for the real-mode trampoline. The
-     *    STARTUP IPI vector can only address the first 1 MB, and a hardcoded
-     *    low address (0x8000) may collide with UEFI firmware data on real
-     *    hardware, so we pick a genuinely free page from the EFI memory map.
-     *    Fall back to 0x8000 if nothing usable is found. */
-    {
-        UINT32 tramp_addr = find_trampoline_addr();
-        if (tramp_addr != 0)
-            g_trampoline_addr = tramp_addr;
-    }
-
-    /* 6. Install the real-mode trampoline at the STARTUP vector. */
-    install_trampoline(g_trampoline_addr);
-
-    /* 7. Start the highest core via the standard INIT-SIPI-SIPI sequence.
-     *
-     * Per the Intel SDM (Vol 3A, section 8.4.4) and the standard x86
-     * multiprocessor convention: send an INIT IPI (level assert), wait at
-     * least 10 ms for the AP to complete its reset, then send a STARTUP IPI
-     * with the trampoline's page number, wait at least 200 us, and send a
-     * SECOND STARTUP IPI as a reliability measure if the AP has not yet
-     * signaled that it booted (g_ap_booted).
-     *
-     * The AP begins executing the trampoline, which switches to long mode
-     * and jumps to ap_entry64(), which sets g_ap_booted, loads the bridge
-     * stack, and calls bridge_entry() (B5).
-     *
-     * CRITICAL: the 10 ms delay after INIT is REQUIRED. If the STARTUP IPI
-     * is sent before the AP has finished its INIT reset, the AP may start
-     * executing in an undefined state and triple-fault, which resets the
-     * ENTIRE system (all cores) - the boot loop we observed.
-     *
-     * ASSUMPTION: the target AP is dormant at this point. We run in the UEFI
-     * boot phase (before ExitBootServices); UEFI runs on the BSP and does not
-     * start APs, so the highest core is idle and safe to claim. We do NOT
-     * check whether the AP is already in use - the bridge is designed to OWN
-     * this core, and the INIT+SIPI sequence resets the AP into a known state
-     * regardless. Keeping the OS from later using this core is an OS-side
-     * accommodation (reserve the core / TDM-share it), handled at the
-     * OS-integration layer (O1/O2), not here.
-     *
-     * NOTE: this runs BEFORE ExitBootServices. That is intentional and safe:
-     * the AP runs its own code (bridge) with its own page tables, stack, and
-     * GDT, and never calls UEFI services. The bridge code/static data live in
-     * the UEFI image, which our page tables identity-map and which stays
-     * resident, so the AP can execute it. Starting the bridge now lets it
-     * publish its status/fault record before we hand off to the OS. */
+    /* 5. Start the highest AP. StartupThisAP wakes the AP in its native
+     *    environment (long mode) and runs bridge_ap_entry on it. The call
+     *    blocks until the AP finishes (or the timeout elapses); bridge_ap_entry
+     *    never returns, so this call effectively never returns either. We use
+     *    a finite timeout so the BSP can detect a failed bring-up. */
     g_ap_booted = 0;
-    send_init_ipi(highest_core);
-    uefi_call_wrapper(BS->Stall, 1, 10000);   /* >= 10 ms after INIT */
-
-    send_startup_ipi(highest_core, g_trampoline_addr >> 12);
-    uefi_call_wrapper(BS->Stall, 1, 200);     /* >= 200 us */
-
-    if (!g_ap_booted) {
-        /* Second SIPI as a reliability measure (standard MP protocol). */
-        send_startup_ipi(highest_core, g_trampoline_addr >> 12);
-        uefi_call_wrapper(BS->Stall, 1, 1000);
-    }
+    status = uefi_call_wrapper(
+        mp->StartupThisAP, 7, mp, bridge_ap_entry, highest_ap,
+        NULL,            /* WaitEvent: NULL = blocking */
+        1000000,         /* TimeoutInMicroseconds: 1 s */
+        NULL,            /* ProcedureArgument */
+        NULL);           /* Finished */
 
 #ifdef BRIDGE_DEBUG
-    /* Report whether the AP actually reached 64-bit mode. g_ap_booted is set
-     * by ap_entry64() as its very first instruction, so a value of 1 proves
-     * the AP: (a) ran the real-mode trampoline, (b) enabled PAE, loaded CR3,
-     * set EFER.LME, and enabled paging (identity mapping worked - the next
-     * instruction fetch after CR0.PG did NOT #PF), and (c) far-jumped into
-     * 64-bit long mode. A value of 0 means the AP failed before reaching
-     * 64-bit mode (trampoline or paging transition). */
-    Print(L"BRIDGE-DBG: AP boot status: g_ap_booted=%d (highest_core=%d, "
-          L"trampoline=0x%x)\n",
-          g_ap_booted, highest_core, g_trampoline_addr);
+    /* Report whether the AP actually reached the bridge entry. g_ap_booted
+     * is set by bridge_ap_entry as its very first action, so a value of 1
+     * proves the AP started and reached the bridge. A value of 0 means the
+     * AP failed to start (or the timeout elapsed). */
+    Print(L"BRIDGE-DBG: AP boot status: g_ap_booted=%d (bridge AP=%d, "
+          L"StartupThisAP status=%r)\n",
+          g_ap_booted, highest_ap, status);
 #endif
 
-    /* 8. Load the input adapter into the reserved region on core 0 (for
+    if (EFI_ERROR(status) || !g_ap_booted)
+        return EFI_DEVICE_ERROR;
+
+    /* 6. Load the input adapter into the reserved region on core 0 (for
      *    O1/O2). The adapter code is also linked into the image; in a full
      *    implementation it is copied to a reserved region on core 0. This
      *    is deferred to the OS-integration phase. */
