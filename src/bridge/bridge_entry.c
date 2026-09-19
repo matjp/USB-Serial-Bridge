@@ -29,7 +29,7 @@ bridge_entry(void)
      * entered its main loop. This is the first thing the BSP harness (and
      * later the OS) looks for to confirm the AP is actually executing the
      * bridge code. */
-    bridge_debug_puts("BRIDGE AP ALIVE: bridge_entry entered");
+    bridge_debug_puts((const CHAR8 *)"BRIDGE AP ALIVE: bridge_entry entered");
 #endif
 
     for (;;) {
@@ -37,7 +37,7 @@ bridge_entry(void)
          * fault), halt cleanly in an idle loop. */
         if (bridge_usb_fatal()) {
 #ifdef BRIDGE_DEBUG
-            bridge_debug_puts("BRIDGE FATAL: halting in idle loop");
+            bridge_debug_puts((const CHAR8 *)"BRIDGE FATAL: halting in idle loop");
 #endif
             for (;;)
                 __asm__ __volatile__("hlt");

@@ -700,35 +700,35 @@ bridge_poll_usb(void)
      * harness can report exactly where the UEFI->XHCI handoff failed. */
     if (!g_xhci_initialized) {
 #ifdef BRIDGE_DEBUG
-        bridge_debug_puts("XHCI bring-up: verify");
+        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: verify");
 #endif
         /* Belt-and-suspenders XHCI >= 1.0 check (C6). */
         if (!xhci_verify_version(&xhci)) {
             xhci_fault(&xhci, XHCI_STAGE_VERIFY, XHCI_FAULT_HINT_VERIFY);
 #ifdef BRIDGE_DEBUG
-            bridge_debug_puts("XHCI FAIL: verify (spec < 1.0)");
+            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: verify (spec < 1.0)");
 #endif
             return;
         }
 
 #ifdef BRIDGE_DEBUG
-        bridge_debug_puts("XHCI bring-up: reset");
+        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: reset");
 #endif
         if (!xhci_reset(&xhci)) {
             xhci_fault(&xhci, XHCI_STAGE_RESET, XHCI_FAULT_HINT_RESET_TIMEOUT);
 #ifdef BRIDGE_DEBUG
-            bridge_debug_puts("XHCI FAIL: reset timeout");
+            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: reset timeout");
 #endif
             return;
         }
 
 #ifdef BRIDGE_DEBUG
-        bridge_debug_puts("XHCI bring-up: rings");
+        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: rings");
 #endif
         if (!xhci_setup_rings(&xhci)) {
             xhci_fault(&xhci, XHCI_STAGE_RINGS, XHCI_FAULT_HINT_RING_SETUP);
 #ifdef BRIDGE_DEBUG
-            bridge_debug_puts("XHCI FAIL: ring setup");
+            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: ring setup");
 #endif
             return;
         }
@@ -745,7 +745,7 @@ bridge_poll_usb(void)
                                  1000000)) {
             xhci_fault(&xhci, XHCI_STAGE_RUN, XHCI_FAULT_HINT_RUN);
 #ifdef BRIDGE_DEBUG
-            bridge_debug_puts("XHCI FAIL: RUN (HCH not cleared)");
+            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: RUN (HCH not cleared)");
 #endif
             return;
         }
@@ -760,7 +760,7 @@ bridge_poll_usb(void)
 #ifdef BRIDGE_DEBUG
         /* Debug builds: record the actual hardware state for the harness. */
         xhci_status_record(&xhci, topo);
-        bridge_debug_puts("XHCI bring-up: OK (RUN set, doorbells rung)");
+        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: OK (RUN set, doorbells rung)");
 #endif
     }
 

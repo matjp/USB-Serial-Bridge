@@ -78,12 +78,17 @@ __attribute__((naked)) static void ap_entry64(void);
 /* GDT pointer, CR3 (PML4 base), and the 64-bit entry point. Layout:   */
 /*                                                                     */
 /*   code  : TRAMPOLINE_CODE_LEN bytes of 16-bit code                  */
-/*   +0x37 : gdt_ptr  (6 bytes: limit + base)                          */
-/*   +0x3D : cr3_val  (8 bytes: PML4 base, low 32 bits used)           */
-/*   +0x45 : entry64  (8 bytes: 64-bit entry point, low 32 bits used)  */
+/*   +0x3B : gdt_ptr  (6 bytes: limit + base)                          */
+/*   +0x41 : cr3_val  (8 bytes: PML4 base, low 32 bits used)           */
+/*   +0x49 : entry64  (8 bytes: 64-bit entry point, low 32 bits used)  */
 /*                                                                     */
 /* The code (all 16-bit, operand-size prefix 0x66 for 32-bit ops):     */
 /*   cli                                                               */
+/*   mov ax, cs ; mov ds, ax   (DS = CS so the DS-relative lgdt and    */
+/*                              mov eax,[cr3_val] resolve to the       */
+/*                              trampoline's own data area; after SIPI  */
+/*                              DS is 0, so without this the lgdt would */
+/*                              read from physical 0x0037, not 0x8037) */
 /*   lgdt [gdt_ptr]                                                    */
 /*   mov eax, cr4 ; or eax, 0x20 (PAE) ; mov cr4, eax                  */
 /*   mov eax, [cr3_val] ; mov cr3, eax                                 */
@@ -91,16 +96,18 @@ __attribute__((naked)) static void ap_entry64(void);
 /*   mov eax, cr0 ; or eax, 0x80000001 (PG|PE) ; mov cr0, eax          */
 /*   jmp 0x08:entry64   (far jump into 64-bit code)                    */
 /* ------------------------------------------------------------------ */
-#define TRAMPOLINE_CODE_LEN  0x37
-#define TRAMP_GDT_PTR_OFF    0x37
-#define TRAMP_CR3_OFF        0x3D
-#define TRAMP_ENTRY64_OFF    0x45
-#define TRAMP_LGDT_DISP      0x04   /* disp16 of the lgdt operand */
-#define TRAMP_CR3_DISP       0x11   /* disp16 of mov eax,[cr3_val] */
-#define TRAMP_FARJMP_OFF     0x31   /* off32 of the far jump */
+#define TRAMPOLINE_CODE_LEN  0x3B
+#define TRAMP_GDT_PTR_OFF    0x3B
+#define TRAMP_CR3_OFF        0x41
+#define TRAMP_ENTRY64_OFF    0x49
+#define TRAMP_LGDT_DISP      0x08   /* disp16 of the lgdt operand */
+#define TRAMP_CR3_DISP       0x15   /* disp16 of mov eax,[cr3_val] */
+#define TRAMP_FARJMP_OFF     0x35   /* off32 of the far jump */
 
 static const UINT8 g_trampoline_code[TRAMPOLINE_CODE_LEN] = {
     0xFA,                                        /* cli */
+    0x8C, 0xC8,                                  /* mov ax, cs */
+    0x8E, 0xD8,                                  /* mov ds, ax */
     0x0F, 0x01, 0x16, 0x00, 0x00,                /* lgdt [gdt_ptr] */
     0x0F, 0x20, 0xE0,                            /* mov eax, cr4 */
     0x83, 0xC8, 0x20,                            /* or eax, 0x20 (PAE) */
@@ -166,20 +173,32 @@ lapic_write(UINT32 offset, UINT32 value)
     lapic[offset / 4] = value;
 }
 
-/* Send an INIT IPI to the given APIC ID. */
+/* Send an INIT IPI to the given APIC ID.
+ *
+ * The local APIC ICR is a 64-bit register split into two 32-bit halves:
+ *   - ICR high (0x310): the destination field (APIC ID, bits 56-63).
+ *   - ICR low  (0x300): the command (delivery mode, trigger, level, vector).
+ * Writing the low half triggers the send. So the destination is written to
+ * 0x310 FIRST, then the command to 0x300. (Writing the command bits into
+ * 0x310 instead is a no-op - the low half is never written, so no IPI is
+ * ever sent.) */
 static void
 send_init_ipi(UINT32 apic_id)
 {
+    /* ICR high: destination APIC ID. */
+    lapic_write(0x310, apic_id << 24);
     /* ICR low: delivery mode 101 (INIT), level assert, trigger level. */
-    lapic_write(0x310, (apic_id << 24) | ICR_INIT_LEVEL_ASSERT);
+    lapic_write(0x300, ICR_INIT_LEVEL_ASSERT);
 }
 
 /* Send a STARTUP IPI to the given APIC ID with the given vector. */
 static void
 send_startup_ipi(UINT32 apic_id, UINT32 vector)
 {
+    /* ICR high: destination APIC ID. */
+    lapic_write(0x310, apic_id << 24);
     /* ICR low: delivery mode 110 (STARTUP), vector. */
-    lapic_write(0x310, (apic_id << 24) | ICR_STARTUP | (vector & 0xFF));
+    lapic_write(0x300, ICR_STARTUP | (vector & 0xFF));
 }
 
 /* ------------------------------------------------------------------ */
