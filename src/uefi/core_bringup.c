@@ -493,6 +493,19 @@ uefi_bringup_highest_core(void)
         uefi_call_wrapper(BS->Stall, 1, 1000);
     }
 
+#ifdef BRIDGE_DEBUG
+    /* Report whether the AP actually reached 64-bit mode. g_ap_booted is set
+     * by ap_entry64() as its very first instruction, so a value of 1 proves
+     * the AP: (a) ran the real-mode trampoline, (b) enabled PAE, loaded CR3,
+     * set EFER.LME, and enabled paging (identity mapping worked - the next
+     * instruction fetch after CR0.PG did NOT #PF), and (c) far-jumped into
+     * 64-bit long mode. A value of 0 means the AP failed before reaching
+     * 64-bit mode (trampoline or paging transition). */
+    Print(L"BRIDGE-DBG: AP boot status: g_ap_booted=%d (highest_core=%d, "
+          L"trampoline=0x%x)\n",
+          g_ap_booted, highest_core, g_trampoline_addr);
+#endif
+
     /* 8. Load the input adapter into the reserved region on core 0 (for
      *    O1/O2). The adapter code is also linked into the image; in a full
      *    implementation it is copied to a reserved region on core 0. This
