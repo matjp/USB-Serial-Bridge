@@ -17,6 +17,44 @@
 #include "uefi/uefi.h"
 #include "uefi/exception_handler.h"
 #include "uefi/log_file.h"
+#include "bridge/bridge_debug.h"
+
+/* Read back the bridge AP's captured serial output from shared memory and
+ * log it. The AP (B4) appends every PS/2 byte it produces to the
+ * BRIDGE_DEBUG ring buffer; the BSP reads it here BEFORE ExitBootServices
+ * so the CI log shows exactly what the bridge is producing. */
+static void
+uefi_log_bridge_output(void)
+{
+    BRIDGE_DEBUG_REC *dbg = (BRIDGE_DEBUG_REC *)(UINTN)BRIDGE_DEBUG_ADDR;
+    UINT32 head, tail, i, n;
+
+    head = dbg->head;
+    tail = dbg->tail;
+
+    Print(L"BRIDGE-DBG: bridge output: head=%u tail=%u wrap=%u "
+          L"kbd_bytes=%u mouse_bytes=%u\n",
+          head, tail, dbg->wrap, dbg->kbd_bytes, dbg->mouse_bytes);
+
+    n = head - tail;
+    if (n > BRIDGE_DEBUG_CAP)
+        n = BRIDGE_DEBUG_CAP;
+
+    if (n == 0) {
+        Print(L"BRIDGE-DBG: bridge output: (no bytes captured)\n");
+        return;
+    }
+
+    Print(L"BRIDGE-DBG: bridge output bytes (%u): ", n);
+    for (i = 0; i < n; i++) {
+        UINT32 idx = (tail + i) & (BRIDGE_DEBUG_CAP - 1);
+        Print(L"%02X ", dbg->data[idx]);
+    }
+    Print(L"\n");
+
+    /* Mark the captured bytes as consumed. */
+    dbg->tail = head;
+}
 
 EFI_STATUS
 EFIAPI
@@ -128,6 +166,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     Print(L"BRIDGE-DBG: calling uefi_check_bridge_fault\n");
     uefi_check_bridge_fault();
     Print(L"BRIDGE-DBG: uefi_check_bridge_fault returned\n");
+
+    /* Read back the bridge AP's captured serial output from shared memory
+     * and log it. The AP has been running its read-only observer + PS/2
+     * write pipeline since bring-up; this shows what it actually produced
+     * before ExitBootServices. */
+    uefi_log_bridge_output();
 
     Print(L"Bridge setup complete. Handing off to OS on core 0.\n");
 

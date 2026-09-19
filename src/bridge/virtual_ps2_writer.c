@@ -33,6 +33,7 @@
 #include <virtual_ps2.h>
 
 #include "bridge.h"
+#include "bridge_debug.h"
 #include "hid_event.h"
 
 /* Write cursors: index of the next byte to emit from each PS/2 stream.
@@ -43,6 +44,30 @@
  * per poll across successive polls, instead of being stuck on byte 0. */
 static UINTN g_vp_kbd_idx  = 0;
 static UINTN g_vp_mouse_idx = 0;
+
+/* Default (weak) implementation of the bridge debug capture. Appends one
+ * serial byte to the shared-memory ring buffer at BRIDGE_DEBUG_ADDR so the
+ * BSP can read it back and log it before ExitBootServices. Host tests
+ * override this weak function with a mock (the fixed address is unmapped
+ * on the host). */
+void
+bridge_debug_capture(UINT8 byte, BOOLEAN is_kbd)
+{
+    BRIDGE_DEBUG_REC *dbg = (BRIDGE_DEBUG_REC *)(UINTN)BRIDGE_DEBUG_ADDR;
+    UINT32 idx;
+
+    if (is_kbd)
+        dbg->kbd_bytes++;
+    else
+        dbg->mouse_bytes++;
+
+    idx = dbg->head & (BRIDGE_DEBUG_CAP - 1);
+    dbg->data[idx] = byte;
+    __asm__ __volatile__("mfence" ::: "memory");
+    dbg->head++;
+    if (dbg->head == 0)
+        dbg->wrap++;
+}
 
 /* Reset the write cursors (used by host tests between cases). */
 void
@@ -69,6 +94,9 @@ bridge_write_virtual_ps2(void)
      * call; the next byte is written on a later poll once consumed. */
     if (g_vp_kbd_idx < g_ps2_kbd_stream.count) {
         virtual_ps2_write_data(g_ps2_kbd_stream.bytes[g_vp_kbd_idx]);
+        /* Capture the actual serial output to shared memory for the BSP
+         * to read back and log before ExitBootServices (debug aid). */
+        bridge_debug_capture(g_ps2_kbd_stream.bytes[g_vp_kbd_idx], TRUE);
         g_vp_kbd_idx++;
         __asm__ __volatile__("mfence" ::: "memory");
         virtual_ps2_set_status(VIRTUAL_PS2_STAT_KBD);
@@ -76,6 +104,9 @@ bridge_write_virtual_ps2(void)
         virtual_ps2_send_irq(VIRTUAL_PS2_IRQ_KBD);
     } else if (g_vp_mouse_idx < g_ps2_mouse_stream.count) {
         virtual_ps2_write_data(g_ps2_mouse_stream.bytes[g_vp_mouse_idx]);
+        /* Capture the actual serial output to shared memory for the BSP
+         * to read back and log before ExitBootServices (debug aid). */
+        bridge_debug_capture(g_ps2_mouse_stream.bytes[g_vp_mouse_idx], FALSE);
         g_vp_mouse_idx++;
         __asm__ __volatile__("mfence" ::: "memory");
         virtual_ps2_set_status(VIRTUAL_PS2_STAT_MOUSE);

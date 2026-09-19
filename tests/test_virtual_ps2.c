@@ -65,6 +65,16 @@ virtual_ps2_send_irq(UINT8 vector)
     g_last_irq = vector;
 }
 
+/* Strong override of the weak bridge_debug_capture (the fixed address
+ * 0x10000050 is unmapped on the host). No-op: the debug capture is a
+ * verification aid, not part of the writer's 8042 semantics under test. */
+void
+bridge_debug_capture(UINT8 byte, BOOLEAN is_kbd)
+{
+    (void)byte;
+    (void)is_kbd;
+}
+
 /* ------------------------------------------------------------------ */
 /* Minimal test framework                                              */
 /* ------------------------------------------------------------------ */
