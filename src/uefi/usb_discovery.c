@@ -492,6 +492,57 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
 }
 
 /* ------------------------------------------------------------------ */
+/* uefi_extract_observer(): retry the XHCI ring extraction until the    */
+/* UEFI event ring is ready (bounded).                                 */
+/*                                                                     */
+/* The first extraction attempt (inside uefi_discover_usb) runs early   */
+/* in the boot, before the firmware's XhciDxe driver has programmed     */
+/* ERSTBA (the event ring segment table base). The OVMF log shows       */
+/* ERSTBA=0 at that point, so the observer extraction fails and the     */
+/* bridge AP would idle read-only forever.                             */
+/*                                                                     */
+/* XhciDxe programs the event ring later, once it has finished          */
+/* initializing the controller. We therefore retry the extraction here  */
+/* (called from main.c AFTER the AP bring-up, when XhciDxe has had      */
+/* time to run) with a bounded delay between attempts. The bridge AP    */
+/* reads the observer from the shared reserved page (XHCI_OBSERVER_ADDR) */
+/* on every poll iteration, so once this populates the page the AP      */
+/* picks up the ring addresses automatically on its next poll.          */
+/*                                                                     */
+/* Returns TRUE if the observer was populated (event ring + kbd/mouse   */
+/* transfer rings located), FALSE if it still was not ready after the   */
+/* timeout.                                                            */
+/* ------------------------------------------------------------------ */
+#define OBSERVER_RETRY_ATTEMPTS 50
+#define OBSERVER_RETRY_DELAY_US 100000   /* 100 ms between attempts */
+
+BOOLEAN
+uefi_extract_observer(void)
+{
+    XHCI_OBSERVER *obs = (XHCI_OBSERVER *)(UINTN)XHCI_OBSERVER_ADDR;
+    UINTN attempt;
+
+    for (attempt = 0; attempt < OBSERVER_RETRY_ATTEMPTS; attempt++) {
+        if (extract_xhci_observer(obs)) {
+            Print(L"BRIDGE-DBG: extract: observer ready on attempt %d "
+                  L"evt=%016llX size=%d kbd_tr=%016llX mouse_tr=%016llX\n",
+                  attempt,
+                  (unsigned long long)obs->event_ring_addr,
+                  obs->event_ring_size,
+                  (unsigned long long)obs->kbd_tr_addr,
+                  (unsigned long long)obs->mouse_tr_addr);
+            return TRUE;
+        }
+        if (attempt + 1 < OBSERVER_RETRY_ATTEMPTS)
+            uefi_call_wrapper(BS->Stall, 1, OBSERVER_RETRY_DELAY_US);
+    }
+
+    Print(L"BRIDGE-DBG: extract: observer NOT ready after %d attempts; "
+          L"AP will idle read-only\n", OBSERVER_RETRY_ATTEMPTS);
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------ */
 /* uefi_discover_usb(): find the single boot-protocol keyboard and      */
 /* mouse, record their interrupt IN endpoints into g_usb_topology.      */
 /* ------------------------------------------------------------------ */

@@ -16,6 +16,14 @@ EFI_STATUS uefi_verify_xhci(void);
 /* U1: Enumerate the single USB keyboard and mouse, record endpoints. */
 EFI_STATUS uefi_discover_usb(void);
 
+/* U1: Retry the XHCI ring extraction (event ring + kbd/mouse transfer
+ * rings) until the firmware's XhciDxe driver has programmed ERSTBA.
+ * The first attempt inside uefi_discover_usb runs too early (ERSTBA is
+ * still 0); this is called again after the AP bring-up, when XhciDxe has
+ * had time to initialize. Populates the XHCI_OBSERVER at XHCI_OBSERVER_ADDR
+ * that the bridge AP reads on every poll. Returns TRUE on success. */
+BOOLEAN uefi_extract_observer(void);
+
 /* U3: Allocate + reserve the bridge, virtual port, and topology regions. */
 EFI_STATUS uefi_reserve_memory(void);
 
