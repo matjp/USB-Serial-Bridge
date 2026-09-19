@@ -1,7 +1,7 @@
 # USB HID → Virtual 8042 Port Bridge
 ## OS-Independent Architecture for USB Keyboard & Mouse on a PS/2-Only OS
 
-**Document version:** 1.4 (Layer 2 done + performance analysis)
+**Document version:** 1.5 (AP is a read-only passive observer of xHCI rings before EBS)
 **Status:** Approved
 **Author:** Principal Software Architect
 **Target hardware:** Modern UEFI PC, exactly one USB keyboard + one USB mouse, fixed topology (no hotplug, no other USB devices ever)
@@ -191,13 +191,20 @@ TDM design is the primary path.
    stack (`EFI_USB2_HC_PROTOCOL` / `EFI_USB_IO_PROTOCOL`).
 3. Record the fixed topology: device addresses, configurations, interfaces, and the
    interrupt IN endpoints for each device. **Done once** — no runtime enumeration.
-4. Determine the core count (CPUID leaf 0xB / ACPI MADT) and pick the highest-numbered
+4. **Extract the XHCI observer** (`XHCI_OBSERVER`): read UEFI's xHCI event ring and the
+   keyboard/mouse transfer-ring addresses **read-only** from the controller's runtime
+   registers (`ERSTBA` → `ERST[0]` → event ring base+size; `DCBAAP` → `DCBAA` → device
+   contexts → endpoint-context TR Dequeue Pointer). This gives the bridge AP the exact
+   ring addresses UEFI's `XhciDxe` driver is using, so the AP can observe them without
+   touching the controller. Stored at `XHCI_OBSERVER_ADDR` (0x10000040).
+5. Determine the core count (CPUID leaf 0xB / ACPI MADT) and pick the highest-numbered
    core as the bridge core.
-5. Allocate the bridge code region and the virtual 8042 port page, and mark them
+6. Allocate the bridge code region and the virtual 8042 port page, and mark them
    `EFI_RESERVED_MEMORY_TYPE` in the EFI memory map so the OS will not allocate over them.
-6. Set up the bridge core's GDT, stack, and page tables, load the bridge code, and start
-   the core via SIPI. The OS's PS/2 driver reads the virtual port region on core 0.
-7. Hand off to the bootloader / OS on the BSP (core 0).
+7. Set up the bridge core's stack, and start the highest AP via the UEFI
+   `EFI_MP_SERVICES_PROTOCOL` (`StartupThisAP`), passing the observer pointer as the
+   procedure argument. The OS's PS/2 driver reads the virtual port region on core 0.
+8. Hand off to the bootloader / OS on the BSP (core 0).
 
 **Phase 2 — Runtime (after `ExitBootServices`):**
 - **Bridge (highest core, TDM with OS task):** runs in its own TDM time slot on the
@@ -207,6 +214,19 @@ TDM design is the primary path.
 - **Main input path (core 0):** the OS's PS/2 driver reads the virtual status/data
   registers and feeds the existing keyboard/mouse input handlers. The OS main thread
   keeps the full core 0.
+
+**Critical pre-`ExitBootServices` constraint (the AP is a READ-ONLY passive observer):**
+Before `ExitBootServices`, the UEFI firmware is **single-threaded on the BSP**, and its
+`XhciDxe` driver **owns the xHCI state machine**. The bridge AP must therefore be a
+**read-only passive observer** of the xHCI rings during this phase — it must **NOT**
+write to the xHCI MMIO operational registers, command ring, doorbells, or `ERDP`. If the
+AP wrote to the controller, it would race with the BSP's `XhciDxe` driver and trigger a
+`#GP` / halt / failed `ExitBootServices`. The AP's observer (`bridge_observer_poll`)
+reads UEFI's event ring read-only, fills the raw HID reports, and advances its **own**
+event-ring dequeue index + cycle bit in memory only — it never writes `ERDP`, so UEFI on
+the BSP remains the sole owner. The **full bring-up** (the writes: reset, setup rings,
+setup devices, RUN, doorbells, `ERDP` updates, rearm) is deferred until **after**
+`ExitBootServices`, when the AP becomes the sole owner of the xHCI rings.
 
 ### 5.2 Why the virtual port presents a "virtual PS/2 stream"
 
@@ -336,7 +356,7 @@ decoder/parser/PutKey logic.
 
 | Module | Responsibility | Relative size |
 |--------|----------------|---------------|
-| **B1. XHCI periodic-IN driver** | Drive the XHCI controller directly (XHCI ≥ 1.0 only, per C6): doorbell, TRB rings, event ring, periodic interrupt IN transfers on the two pre-discovered **low/full-speed** endpoints. No SuperSpeed support, no enumeration, no hotplug, no hardware interrupts consumed (the bridge polls; it is an interrupt *producer*, not consumer) | Largest (~300–600 LOC) |
+| **B1. XHCI periodic-IN driver** | Drive the XHCI controller directly (XHCI ≥ 1.0 only, per C6): doorbell, TRB rings, event ring, periodic interrupt IN transfers on the two pre-discovered **low/full-speed** endpoints. No SuperSpeed support, no enumeration, no hotplug, no hardware interrupts consumed (the bridge polls; it is an interrupt *producer*, not consumer). **Two modes:** (a) **read-only passive observer** (`bridge_observer_poll`) before `ExitBootServices` — reads UEFI's event ring read-only, fills the raw HID reports, never writes to the controller; (b) **full bring-up** (`bridge_poll_usb`) after `ExitBootServices` — the AP becomes sole owner and performs the writes (reset, rings, devices, RUN, doorbells, `ERDP`, rearm) | Largest (~300–600 LOC) |
 | **B2. HID report parser** | Parse boot-protocol keyboard (8-byte report) and mouse (3-byte report) reports | Small |
 | **B3. HID → PS/2 Set 1 translator** | Usage → Set 1 scancode table (make/break), mouse buttons/dx/dy → PS/2 packet | Small |
 | **B4. Virtual 8042 port writer + IRQ emitter** | 8042-style producer: write one byte to the virtual data register, set the status bit, `mfence` ordering, then send the virtual IRQ (IPI) on the device's vector so the OS's ISR fires. One byte in flight at a time | Tiny |
@@ -373,8 +393,8 @@ bridge's virtual IRQ) do the read. The OS source is otherwise untouched.
 
 | Module | Responsibility | Relative size |
 |--------|----------------|---------------|
-| **U1. USB topology discovery** | Verify host controller is XHCI ≥ 1.0 (C6); use UEFI USB stack to find kbd+mouse, record endpoints | Small |
-| **U2. Highest-core bring-up** | Determine core count; start the highest AP via the UEFI `EFI_MP_SERVICES_PROTOCOL` (`StartupThisAP`), which wakes it in its native long-mode environment and runs the bridge entry | Small |
+| **U1. USB topology discovery** | Verify host controller is XHCI ≥ 1.0 (C6); use UEFI USB stack to find kbd+mouse, record endpoints; **extract the XHCI observer** (UEFI's event ring + kbd/mouse transfer-ring addresses, read-only) into `XHCI_OBSERVER` at `XHCI_OBSERVER_ADDR` | Small |
+| **U2. Highest-core bring-up** | Determine core count; start the highest AP via the UEFI `EFI_MP_SERVICES_PROTOCOL` (`StartupThisAP`), which wakes it in its native long-mode environment and runs the bridge entry. **Passes the observer pointer as the `ProcedureArgument`** so the AP can poll UEFI's rings read-only before `ExitBootServices` | Small |
 | **U3. Memory reservation** | Allocate bridge + virtual port region, mark reserved in EFI memory map | Tiny |
 
 ---
@@ -389,14 +409,15 @@ sequenceDiagram
     participant C0 as Core 0 (OS main thread)
     FW->>APP: Load UEFI app
     APP->>APP: Enumerate USB kbd and mouse
+    APP->>APP: Extract XHCI observer (UEFI's rings, read-only)
     APP->>APP: Allocate bridge and virtual port region
     APP->>APP: Mark memory reserved
-    APP->>CN: MP Services StartupThisAP (start highest core)
-    APP->>CN: Load bridge code
+    APP->>CN: MP Services StartupThisAP (start highest core, pass observer ptr)
     APP->>C0: ExitBootServices
     APP->>C0: Boot OS
     loop forever (parallel)
-        CN->>CN: Poll XHCI periodic IN
+        CN->>CN: Read-only observer polls UEFI's event ring (pre-EBS)
+        CN->>CN: Full XHCI bring-up (post-EBS, sole owner)
         CN->>CN: Translate HID to PS/2
         CN->>C0: Write virtual 8042 port + send virtual IRQ (IPI)
         CN->>CN: OS background task runs
@@ -411,6 +432,7 @@ sequenceDiagram
 | Risk | Mitigation / Verification |
 |------|---------------------------|
 | OS overwrites bridge/virtual-port RAM | Mark region `EFI_RESERVED_MEMORY_TYPE` **and** carve it out of the memory map the OS collects (e.g. E820 for TempleOS). Place bridge/virtual-port region above the OS's physical memory space so it never allocates over it |
+| **AP writes to xHCI before `ExitBootServices` (races with UEFI `XhciDxe` on the BSP)** | **The AP is a READ-ONLY passive observer before EBS.** It polls UEFI's event ring read-only (`bridge_observer_poll`), fills the raw HID reports, and advances its OWN dequeue index + cycle bit in memory only — it NEVER writes `ERDP`, doorbells, or re-arms rings. UEFI on the BSP remains the sole owner. The full bring-up (writes) is deferred until after EBS when the AP becomes sole owner. U1 extracts the observer (UEFI's ring addresses) read-only; U2 passes it to the AP via `StartupThisAP`'s `ProcedureArgument` |
 | OS main thread uses the bridge core | The bridge **TDM-shares** the highest core with the OS's background task there — no need to exclude the core from the OS's core count. The main thread stays on core 0 and never runs on the bridge core |
 | Highest-core bring-up fails | **Verify** the `EFI_MP_SERVICES_PROTOCOL` lookup, processor enumeration, and `StartupThisAP`; test in QEMU with multiple cores |
 | XHCI periodic-IN without runtime enumeration | Enumerate once via UEFI (Phase 1); **verify** endpoint addresses remain valid after `ExitBootServices` |

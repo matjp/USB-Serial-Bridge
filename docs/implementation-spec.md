@@ -1,7 +1,7 @@
 # Firmware Coder Implementation Spec
 ## Exact interfaces, structs, and function signatures for B1–B5, U1–U3, O1
 
-**Document version:** 1.2 (Layer 2 — O1 reader + stub harness implemented)
+**Document version:** 1.3 (AP is a read-only passive observer of xHCI rings before EBS)
 **Status:** Approved — Layer 2 (O1) implemented; Layer 1 real-hardware bring-up pending
 **Author:** Principal Software Architect
 **Target:** GNU-EFI 4.0.2, x86_64 UEFI application (PE32+), ISO C99, no std headers
@@ -119,9 +119,38 @@ typedef struct {
 periodic interrupt IN transfers on the two pre-discovered low/full-speed endpoints.
 No SuperSpeed, no enumeration, no hotplug, no interrupts.
 
+**Two modes (critical — the AP is a READ-ONLY passive observer before `ExitBootServices`):**
+- **Read-only passive observer (`bridge_observer_poll`)** — used **before**
+  `ExitBootServices`. The UEFI firmware is single-threaded on the BSP and its `XhciDxe`
+  driver owns the xHCI state machine, so the AP must NOT write to the controller. The
+  observer reads UEFI's event ring **read-only**, fills the raw HID reports, and
+  advances its **own** event-ring dequeue index + cycle bit in memory only. It NEVER
+  writes `ERDP`, doorbells, or re-arms rings — UEFI on the BSP remains the sole owner.
+- **Full bring-up (`bridge_poll_usb`)** — used **after** `ExitBootServices`, when the
+  AP becomes the sole owner of the xHCI rings and performs the writes (reset, setup
+  rings, setup devices, RUN, doorbells, `ERDP` updates, rearm).
+
 **Public interface (already in `src/bridge/bridge.h`):**
 ```c
-void bridge_poll_usb(void);
+void bridge_poll_usb(void);                       /* full bring-up (post-EBS) */
+void bridge_observer_poll(const XHCI_OBSERVER *obs); /* read-only observer (pre-EBS) */
+```
+
+**The observer (`src/bridge/xhci_observer.h`):** a fixed-address struct in the reserved
+region that U1 fills (read-only) with UEFI's xHCI ring addresses, so the AP can observe
+them without touching the controller:
+```c
+#define XHCI_OBSERVER_ADDR 0x10000040ULL
+
+typedef struct {
+    UINT64 event_ring_addr;   /* UEFI's event ring base (from ERST[0]) */
+    UINT32 event_ring_size;   /* event ring segment size (TRBs) */
+    UINT32 reserved0;
+    UINT64 kbd_tr_addr;       /* keyboard transfer ring base (from DCBAA) */
+    UINT64 mouse_tr_addr;     /* mouse transfer ring base (from DCBAA) */
+    UINT32 kbd_slot;          /* keyboard device slot */
+    UINT32 mouse_slot;        /* mouse device slot */
+} XHCI_OBSERVER;
 ```
 
 **Internal state (file-local, in the reserved region):**
@@ -139,7 +168,7 @@ typedef struct {
 } XHCI;
 ```
 
-**Required implementation steps:**
+**Required implementation steps (full bring-up, `bridge_poll_usb`, post-EBS):**
 1. **Verify XHCI ≥ 1.0 (C6)** — read `HCSPARAMS1`/`HCCPARAMS` capability registers.
    The XHCI spec version is in `HCCPARAMS1` bits 31:24 (e.g. 0x10 = 1.0). If < 1.0,
    halt and signal failure (see B5 error handling). This is a belt-and-suspenders check
@@ -164,11 +193,25 @@ typedef struct {
    extern BOOLEAN g_mouse_valid;         /* set when a fresh mouse report is ready */
    ```
 
+**Required implementation steps (read-only observer, `bridge_observer_poll`, pre-EBS):**
+1. Read the event-ring TRB at the AP's **own** tracked dequeue index (`g_obs_deq`).
+2. If the TRB's cycle bit does not match the AP's tracked cycle bit (`g_obs_cycle`),
+   there is no new event from the controller — return.
+3. On a Transfer Event TRB with `CC_SUCCESS` or `CC_SHORT_PACKET`, match the completed
+   TRB to the keyboard/mouse transfer ring by **page-aligned base**
+   (`(trb_ptr & ~0xFFFULL) == (obs->kbd_tr_addr & ~0xFFFULL)`), read the data buffer
+   from the completed TRB, and fill `g_raw_kbd`/`g_raw_mouse` + set the valid flags.
+4. Advance the AP's **own** dequeue index (`g_obs_deq = (g_obs_deq + 1) %
+   event_ring_size`), toggling `g_obs_cycle` on wrap. **Never write `ERDP`** — UEFI on
+   the BSP remains the sole owner of the controller.
+
 **Constraints:**
 - XHCI ≥ 1.0 only. No EHCI/UHCI/OHCI.
 - No SuperSpeed — only the two low/full-speed interrupt endpoints.
 - No interrupts — poll the event ring in `bridge_poll_usb()`.
 - No enumeration, no hotplug — fixed topology from U1.
+- **Before `ExitBootServices`, the AP must NEVER write to the xHCI controller** — it is
+  a read-only passive observer. The full bring-up (writes) happens only after EBS.
 
 **Debugging model (UEFI → XHCI handoff):** The controller is handed off from UEFI in
 an unknown, partially-configured state, so re-configuring it is the most failure-prone
@@ -384,11 +427,20 @@ void bridge_entry(void);
 1. Run the poll loop:
    ```c
    void bridge_entry(void) {
+       /* Before ExitBootServices, the AP is a READ-ONLY passive observer of the
+          xHCI rings (UEFI's XhciDxe owns the controller on the BSP). The observer
+          reads UEFI's event ring read-only and fills the raw HID reports; it never
+          writes to the controller. The full bring-up (bridge_poll_usb, which
+          writes) is deferred until after ExitBootServices when the AP becomes the
+          sole owner. */
+       const XHCI_OBSERVER *obs = (const XHCI_OBSERVER *)(UINTN)XHCI_OBSERVER_ADDR;
        for (;;) {
-           bridge_poll_usb();          /* B1 */
-           bridge_parse_hid();         /* B2 */
-           bridge_translate_ps2();     /* B3 */
-           bridge_write_virtual_ps2(); /* B4 */
+           if (bridge_usb_fatal()) { for (;;) __asm__ __volatile__("hlt"); }
+           bridge_observer_poll(obs);   /* B1 read-only observer (pre-EBS) */
+           /* after EBS: bridge_poll_usb();  B1 full bring-up (sole owner) */
+           bridge_parse_hid();          /* B2 */
+           bridge_translate_ps2();      /* B3 */
+           bridge_write_virtual_ps2();  /* B4 */
            /* TDM: yield the core back to the OS background task (Seth) until
               the next bridge time slot. Implemented by the timer ISR that
               switches between bridge context and OS task context. */
@@ -505,6 +557,15 @@ EFI_STATUS uefi_discover_usb(void);
    - the XHCI MMIO base + CAPLENGTH (for B1 direct drive).
 3. **Done once** — no runtime enumeration. Store the `USB_TOPOLOGY` at a known address
    in the reserved region (see U3).
+4. **Extract the XHCI observer** (`extract_xhci_observer`, read-only) into
+   `XHCI_OBSERVER` at `XHCI_OBSERVER_ADDR` (0x10000040). This gives the bridge AP the
+   exact ring addresses UEFI's `XhciDxe` driver is using, so the AP can observe them
+   read-only before `ExitBootServices` without touching the controller:
+   - Read the runtime `ERSTBA` → `ERST[0]` → event ring base + size.
+   - Read the operational `DCBAAP` → `DCBAA` → device contexts → endpoint-context TR
+     Dequeue Pointer for the keyboard and mouse, matching slots by root-hub port number.
+   - Store `event_ring_addr`, `event_ring_size`, `kbd_tr_addr`, `mouse_tr_addr`,
+     `kbd_slot`, `mouse_slot` in the `XHCI_OBSERVER` at `XHCI_OBSERVER_ADDR`.
 
 ### 4.2 U2 — Highest-core bring-up (`src/uefi/core_bringup.c`)
 
@@ -533,7 +594,13 @@ EFI_STATUS uefi_bringup_highest_core(void);
 4. **Start the highest AP via `StartupThisAP`**, passing the AP procedure
    `bridge_ap_entry` (an `EFIAPI` function that switches to the reserved-region
    bridge stack, sets `g_ap_booted`, and calls `bridge_entry`, B5). Use a finite
-   timeout so the BSP can detect a failed bring-up.
+   timeout so the BSP can detect a failed bring-up. **Pass the observer pointer as
+   the `ProcedureArgument`** — `(VOID *)(UINTN)XHCI_OBSERVER_ADDR` — so the AP can
+   poll UEFI's xHCI rings read-only before `ExitBootServices`. The reserved page is
+   identity-mapped in the AP's page tables, so the pointer stays valid after the AP
+   detaches. (`bridge_entry` also reads the observer from the fixed address directly,
+   so the pointer is passed per the architecture but the fixed-address read is
+   authoritative.)
 5. **Load the input adapter** into the reserved region on core 0 (for O1).
 
 ### 4.3 U3 — Memory reservation (`src/uefi/mem_reserve.c`)
@@ -610,10 +677,10 @@ Implement in dependency order. Each task is independently verifiable.
 | 3 | HID report parser | B2 | `src/bridge/hid_parser.c` | — | Layer 0 host test (pure C) |
 | 4 | Virtual port writer + IRQ emitter | B4 | `src/bridge/virtual_ps2_writer.c` | 1 | Layer 0 host test |
 | 5 | Virtual port reader (ISR-driven) | O1 | `src/adapter/virtual_ps2_reader.c` | 1 | ✅ Layer 0 host test (test_layer2_reader, 20 asserts) |
-| 6 | XHCI periodic-IN driver | B1 | `src/bridge/xhci.c` | 1, U1 | Layer 1 (QEMU + real HW) |
-| 7 | USB topology discovery | U1 | `src/uefi/usb_discovery.c` | — | Layer 1 |
+| 6 | XHCI periodic-IN driver (full bring-up + read-only observer) | B1 | `src/bridge/xhci.c`, `src/bridge/xhci_observer.h` | 1, U1 | Layer 1 (QEMU + real HW) |
+| 7 | USB topology discovery (+ XHCI observer extraction) | U1 | `src/uefi/usb_discovery.c` | — | Layer 1 |
 | 8 | Memory reservation | U3 | `src/uefi/mem_reserve.c` | 1 | Layer 1 |
-| 9 | Highest-core bring-up + TDM | U2, B5 | `src/uefi/core_bringup.c`, `src/bridge/bridge_entry.c`, `src/bridge/tdm.h` | 6,7,8 | Layer 1 (real HW) |
+| 9 | Highest-core bring-up + TDM (pass observer ptr via StartupThisAP) | U2, B5 | `src/uefi/core_bringup.c`, `src/bridge/bridge_entry.c`, `src/bridge/tdm.h` | 6,7,8 | Layer 1 (real HW) |
 | 10 | OS PS/2 driver read-and-clear + APIC EOI (in the OS, not this repo) | O1 | OS source | 5 | Layer 3 (OS boot) |
 | 11 | Second-OS virtual-port reader (portability demo) | O1' | new | 5 | Layer 2 |
 
@@ -627,9 +694,14 @@ Implement in dependency order. Each task is independently verifiable.
     Two real-HW hangs found and fixed: (1) direct MMIO dereference in `uefi_verify_xhci`
     → use `EFI_PCI_IO_PROTOCOL.Mem.Read` (commit `c66eaf6`); (2) unzeroed reserved page
     in `uefi_check_bridge_fault` → zero the page after `AllocatePages` (commit `2bd7081`).
-  - ⏳ **Bridge core (B1 XHCI handoff) PENDING:** U2 is still a scaffold — the bridge code
-    is not loaded onto the AP, so `bridge_poll_usb()` never runs and no `BRIDGE OK` marker
-    is produced. Full AP bring-up is the remaining Layer 1 work.
+  - ⏳ **Bridge core (B1 XHCI handoff) PENDING:** the AP is now a **read-only passive
+    observer** before `ExitBootServices` (it polls UEFI's event ring read-only via
+    `bridge_observer_poll` and never writes to the controller, fixing the #GP that
+    occurred when the AP ran the full bring-up and raced with the BSP's `XhciDxe`).
+    The full bring-up (`bridge_poll_usb`, which writes) is deferred until after
+    `ExitBootServices` when the AP becomes sole owner. Because EBS is not yet wired,
+    the full bring-up never runs and no `BRIDGE OK` marker is produced yet. Wiring EBS
+    (then running the full bring-up on the AP) is the remaining Layer 1 work.
 - **Layer 2:** O1 read against a stub PS/2 driver — real hardware. ✅ **Host portion DONE** (test_layer2_reader); real-hardware portion pending.
 - **Layer 3:** end-to-end OS boot (optional, final).
 
