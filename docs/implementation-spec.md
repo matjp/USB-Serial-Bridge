@@ -224,6 +224,30 @@ typedef struct {
   kbd/mouse endpoint configuration. The Layer 1 harness then prints this state to the
   console on success (bounded wait for the record, ~6 lines, fits 80×25). The normal
   `bridge.efi` build is unchanged (silent on success).
+- **Persistent bridge debug channel — virtual debug serial (`BRIDGE_DEBUG`):** the BSP
+  harness and the UEFI console are only available during the boot phase; once the bridge
+  is handed off (or the BSP harness is gone), the bridge has no output channel. To debug
+  the bridge after handoff, the bridge implements its own **virtual debug serial port**
+  in shared memory — a fixed ring buffer in the reserved region that the bridge writes
+  diagnostic text to (its "serial out") and that the OS (or the BSP harness, before
+  handoff) reads (its "serial in"). Same producer/consumer pattern as the virtual 8042
+  port, but for debug output instead of input.
+  - **Why this design:** (1) **persistent** — lives in the reserved region, survives
+    handoff and the BSP harness being gone; (2) **OS-independent** — the bridge just
+    writes bytes, any OS can read them; (3) **no console-driver dependency** — plain
+    memory stores to a fixed address, avoiding the page-table / firmware-driver concerns
+    of calling `ConOut->OutputString` from the AP (whose page tables only identity-map
+    the low 4 GB, and whose console driver code may live above 4 GB); (4) **reuses the
+    established pattern** — the same fixed-address shared-memory mechanism as the
+    virtual 8042 port.
+  - **Layout:** a fixed ring buffer of NUL-terminated diagnostic lines at a new address
+    in the reserved region, clear of the existing slots (`0x10000000` mailbox,
+    `0x10000008` topology, `0x10000018` fault, `0x10000020` status, `0x10000030` virtual
+    8042). The bridge writes lines via a `bridge_debug_puts()` helper; a reader (BSP
+    harness now, OS later) drains the buffer.
+  - **Gating:** compiled in **only** under `BRIDGE_DEBUG` (the debug build). The normal
+    `bridge.efi` build is unchanged — no debug-serial writes, no reserved-region debug
+    buffer. Keeps the release image silent and minimal.
 
 ### 2.2 B2 — HID report parser (`src/bridge/hid_parser.c`)
 

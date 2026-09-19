@@ -18,6 +18,7 @@
 #include "uefi.h"
 #include "../bridge/xhci_fault.h"
 #include "../bridge/xhci_status.h"
+#include "../bridge/bridge_debug.h"
 
 /* Bounded spin so the bridge has time to run its first bring-up poll after
  * SIPI. Bring-up is microseconds-to-low-milliseconds; a few million empty
@@ -139,6 +140,36 @@ print_bridge_status(void)
           st->mouse & 0xFF, (st->mouse >> 8) & 0xFF, (st->mouse >> 16) & 0xFF,
           (st->mouse >> 24) & 0xFF, st->mouse_max_packet);
 }
+
+/* Debug builds only: dump the bridge's virtual debug serial ring buffer to
+ * the console. This is the bridge's own "serial out" - the diagnostic lines
+ * it wrote to shared memory (see bridge_debug.h). Reading it here (before
+ * handoff) confirms the bridge AP is actually executing and shows how far it
+ * got through bring-up. */
+static void
+dump_bridge_debug(void)
+{
+    volatile BRIDGE_DEBUG_HDR *hdr;
+    UINT32 i;
+
+    hdr = (volatile BRIDGE_DEBUG_HDR *)(UINTN)BRIDGE_DEBUG_BUF_ADDR;
+    if (hdr->magic != BRIDGE_DEBUG_MAGIC) {
+        Print(L"BRIDGE-DBG: no virtual debug serial (magic not set)\n");
+        return;
+    }
+
+    Print(L"\n*** BRIDGE VIRTUAL DEBUG SERIAL (%u lines) ***\n",
+          hdr->write_seq);
+    for (i = 0; i < BRIDGE_DEBUG_LINE_COUNT; i++) {
+        volatile CHAR8 *line =
+            (volatile CHAR8 *)(UINTN)(BRIDGE_DEBUG_BUF_ADDR +
+                                      sizeof(BRIDGE_DEBUG_HDR) +
+                                      i * BRIDGE_DEBUG_LINE_LEN);
+        if (line[0] != '\0')
+            Print(L"  [%02u] %a\n", i, (CHAR8 *)line);
+    }
+    Print(L"*** END BRIDGE DEBUG SERIAL ***\n");
+}
 #endif /* BRIDGE_DEBUG */
 
 /* Check the bridge fault record after bring-up. If the bridge faulted, print
@@ -154,8 +185,10 @@ uefi_check_bridge_fault(void)
 
     if (fault == NULL) {
 #ifdef BRIDGE_DEBUG
-        /* Bridge is healthy; in debug builds print the hardware state. */
+        /* Bridge is healthy; in debug builds print the hardware state and
+         * dump the bridge's virtual debug serial. */
         print_bridge_status();
+        dump_bridge_debug();
 #endif
         return;   /* bridge is healthy; proceed to hand off */
     }

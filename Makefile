@@ -67,7 +67,8 @@ BRIDGE_SRCS     := src/bridge/xhci.c \
                    src/bridge/virtual_ps2_access.c \
                    src/bridge/virtual_ps2_writer.c \
                    src/bridge/bridge_entry.c \
-                   src/bridge/tdm.c
+                   src/bridge/tdm.c \
+                   src/bridge/bridge_debug.c
 
 # Input adapter code (O1): the consumer-side virtual port reader, loaded
 # into the reserved region on core 0 (see docs/architecture.md section 7.2).
