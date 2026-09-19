@@ -232,6 +232,7 @@ uefi_bringup_highest_core(void)
     UINTN highest_ap = 0;
     UINTN i;
     EFI_PHYSICAL_ADDRESS stack_addr = 0;
+    EFI_EVENT ap_done_event = NULL;
     BOOLEAN found = FALSE;
 
     /* 1. Locate the MP Services protocol. This is the firmware-sanctioned
@@ -308,17 +309,34 @@ uefi_bringup_highest_core(void)
     g_bridge_stack_top = stack_addr + BRIDGE_STACK_SIZE;
 
     /* 5. Start the highest AP. StartupThisAP wakes the AP in its native
-     *    environment (long mode) and runs bridge_ap_entry on it. The call
-     *    blocks until the AP finishes (or the timeout elapses); bridge_ap_entry
-     *    never returns, so this call effectively never returns either. We use
-     *    a finite timeout so the BSP can detect a failed bring-up. */
+     *    environment (long mode) and runs bridge_ap_entry on it.
+     *
+     *    CRITICAL: WaitEvent MUST be non-NULL. If WaitEvent is NULL,
+     *    StartupThisAP BLOCKS until the AP procedure FINISHES. But
+     *    bridge_ap_entry never returns (it calls bridge_entry(), which loops
+     *    forever), so a blocking StartupThisAP would hang the BSP forever.
+     *    Passing a valid event makes StartupThisAP return immediately after
+     *    dispatching the AP; the event is signaled only when the AP finishes
+     *    (which never happens here, and we never wait on it). We then verify
+     *    the AP actually started via the g_ap_booted handshake. */
+    status = uefi_call_wrapper(
+        BS->CreateEvent, 5, EVT_NOTIFY_WAIT, TPL_NOTIFY, NULL, NULL,
+        &ap_done_event);
+    if (EFI_ERROR(status))
+        return status;
+
     g_ap_booted = 0;
     status = uefi_call_wrapper(
         mp->StartupThisAP, 7, mp, bridge_ap_entry, highest_ap,
-        NULL,            /* WaitEvent: NULL = blocking */
-        1000000,         /* TimeoutInMicroseconds: 1 s */
-        NULL,            /* ProcedureArgument */
-        NULL);           /* Finished */
+        ap_done_event,    /* WaitEvent: non-NULL = non-blocking (returns
+                           * immediately after dispatching the AP) */
+        1000000,          /* TimeoutInMicroseconds: 1 s */
+        NULL,             /* ProcedureArgument */
+        NULL);            /* Finished */
+
+    /* The event is never signaled (the AP never finishes), so we do not wait
+     * on it. Close it to avoid leaking the handle. */
+    uefi_call_wrapper(BS->CloseEvent, 1, ap_done_event);
 
 #ifdef BRIDGE_DEBUG
     /* Report whether the AP actually reached the bridge entry. g_ap_booted
