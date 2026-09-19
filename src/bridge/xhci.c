@@ -687,14 +687,23 @@ bridge_poll_usb(void)
 
     topo = usb_topology_get();
     if (topo == NULL) {
+#ifdef BRIDGE_DEBUG
+        bridge_debug_puts((const CHAR8 *)"XHCI poll: topology NULL (fatal)");
+#endif
         xhci_fault(NULL, XHCI_STAGE_NONE, XHCI_FAULT_HINT_NONE);
         return;
     }
 
+#ifdef BRIDGE_DEBUG
+    bridge_debug_puts((const CHAR8 *)"XHCI poll: topology OK, init");
+#endif
     xhci_init(&xhci, topo);
 
     /* Publish the fault record once so the harness can read it after a halt. */
     xhci_fault_publish_rec();
+#ifdef BRIDGE_DEBUG
+    bridge_debug_puts((const CHAR8 *)"XHCI poll: fault rec published");
+#endif
 
     /* One-time controller bring-up. Each stage records its own fault so the
      * harness can report exactly where the UEFI->XHCI handoff failed. */

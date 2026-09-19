@@ -414,6 +414,12 @@ uefi_bringup_highest_core(void)
     Print(L"BRIDGE-DBG: AP boot status: g_ap_booted=%d (bridge AP=%d, "
           L"StartupThisAP status=%r)\n",
           g_ap_booted, highest_ap, status);
+
+    /* Dump the bridge's virtual debug serial right here, before returning.
+     * The BSP may hang shortly after (e.g. when the AP's XHCI reset disrupts
+     * the BSP's UEFI environment), so capture the AP's progress now. */
+    Print(L"BRIDGE-DBG: dumping bridge virtual debug serial (early)\n");
+    dump_bridge_debug();
 #endif
 
     if (EFI_ERROR(status) || !g_ap_booted)

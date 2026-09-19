@@ -28,4 +28,9 @@ EFI_STATUS uefi_bringup_highest_core(void);
  * the OS). Returns normally if the bridge is healthy. */
 void uefi_check_bridge_fault(void);
 
+/* Debug builds only: dump the bridge's virtual debug serial ring buffer to
+ * the console. Exposed so the bring-up path can dump it early, before the BSP
+ * may hang (see l1_harness.c). No-op in non-debug builds. */
+void dump_bridge_debug(void);
+
 #endif /* UEFI_H */

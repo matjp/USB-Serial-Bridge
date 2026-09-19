@@ -145,8 +145,9 @@ print_bridge_status(void)
  * the console. This is the bridge's own "serial out" - the diagnostic lines
  * it wrote to shared memory (see bridge_debug.h). Reading it here (before
  * handoff) confirms the bridge AP is actually executing and shows how far it
- * got through bring-up. */
-static void
+ * got through bring-up. Exposed (non-static) so the bring-up path can dump
+ * it early, before the BSP may hang. */
+void
 dump_bridge_debug(void)
 {
     volatile BRIDGE_DEBUG_HDR *hdr;
