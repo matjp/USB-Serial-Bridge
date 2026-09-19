@@ -383,17 +383,24 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
     BOOLEAN kbd_found = FALSE;
     BOOLEAN mouse_found = FALSE;
 
-    if (mmio == 0)
+    if (mmio == 0) {
+        Print(L"BRIDGE-DBG: obs: mmio==0\n");
         return FALSE;
+    }
 
     /* Runtime register base = mmio + RTSOFF (capability offset 0x18). */
     rt_off = xhci_cap_read32(mmio, 0x18) & 0xFFFFFFF0u;
+    Print(L"BRIDGE-DBG: obs: mmio=%016llX cap_len=%d rt_off=%08X\n",
+          (unsigned long long)mmio, cap_len, rt_off);
 
     /* ERSTBA at runtime offset 0x10 (low), 0x14 (high). */
     erst_addr = ((UINT64)xhci_mmio_read32(mmio, rt_off + 0x14) << 32) |
                 xhci_mmio_read32(mmio, rt_off + 0x10);
-    if (erst_addr == 0)
+    Print(L"BRIDGE-DBG: obs: ERSTBA=%016llX\n", (unsigned long long)erst_addr);
+    if (erst_addr == 0) {
+        Print(L"BRIDGE-DBG: obs: ERSTBA==0 (event ring not set up)\n");
         return FALSE;
+    }
 
     /* ERST[0]: seg_addr_low at +0, seg_addr_high at +4, seg_size at +8.
      * The ERST is in memory (allocated by XhciDxe), so a direct read is
@@ -403,8 +410,13 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
         evt_addr = ((UINT64)erst[1] << 32) | erst[0];
         evt_size = erst[2];
     }
-    if (evt_addr == 0 || evt_size == 0)
+    Print(L"BRIDGE-DBG: obs: evt_addr=%016llX evt_size=%d\n",
+          (unsigned long long)evt_addr, evt_size);
+    if (evt_addr == 0 || evt_size == 0) {
+        Print(L"BRIDGE-DBG: obs: ERST[0] empty (evt_addr=%016llX size=%d)\n",
+              (unsigned long long)evt_addr, evt_size);
         return FALSE;
+    }
 
     obs->event_ring_addr = evt_addr;
     obs->event_ring_size = evt_size;
@@ -412,11 +424,15 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
     /* DCBAAP at op offset 0x30 (low), 0x34 (high). */
     dcbaa_addr = ((UINT64)xhci_mmio_read32(mmio, cap_len + 0x34) << 32) |
                  xhci_mmio_read32(mmio, cap_len + 0x30);
-    if (dcbaa_addr == 0)
+    Print(L"BRIDGE-DBG: obs: DCBAAP=%016llX\n", (unsigned long long)dcbaa_addr);
+    if (dcbaa_addr == 0) {
+        Print(L"BRIDGE-DBG: obs: DCBAAP==0 (device contexts not set up)\n");
         return FALSE;
+    }
 
     hcsparams1 = xhci_cap_read32(mmio, 0x04);
     max_slots = hcsparams1 & 0xFF;
+    Print(L"BRIDGE-DBG: obs: max_slots=%d\n", max_slots);
 
     /* Walk the slots, match by root-hub port number (slot context DWORD 1
      * bits 7:0). The device contexts are in memory (allocated by XhciDxe),
@@ -437,6 +453,11 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
         slot_ctx = (volatile UINT32 *)(UINTN)dev_ctx_addr;
         port = slot_ctx[1] & 0xFF;   /* Root Hub Port Number (bits 7:0) */
 
+        Print(L"BRIDGE-DBG: obs: slot %d dev_ctx=%016llX port=%d "
+              L"(kbd.port=%d mouse.port=%d)\\n",
+              slot, (unsigned long long)dev_ctx_addr, port,
+              g_usb_topology.kbd.port, g_usb_topology.mouse.port);
+
         if (port == g_usb_topology.kbd.port && !kbd_found) {
             ep_num = g_usb_topology.kbd.endpoint & 0x0F;
             ep_index = 2 * ep_num + 1;   /* IN endpoint context index */
@@ -446,6 +467,8 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
             obs->kbd_tr_addr = tr_dequeue;
             obs->kbd_slot = slot;
             kbd_found = TRUE;
+            Print(L"BRIDGE-DBG: obs: kbd slot=%d ep=%d tr=%016llX\\n",
+                  slot, ep_num, (unsigned long long)tr_dequeue);
         } else if (port == g_usb_topology.mouse.port && !mouse_found) {
             ep_num = g_usb_topology.mouse.endpoint & 0x0F;
             ep_index = 2 * ep_num + 1;   /* IN endpoint context index */
@@ -455,12 +478,16 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
             obs->mouse_tr_addr = tr_dequeue;
             obs->mouse_slot = slot;
             mouse_found = TRUE;
+            Print(L"BRIDGE-DBG: obs: mouse slot=%d ep=%d tr=%016llX\\n",
+                  slot, ep_num, (unsigned long long)tr_dequeue);
         }
 
         if (kbd_found && mouse_found)
             break;
     }
 
+    Print(L"BRIDGE-DBG: obs: kbd_found=%d mouse_found=%d\\n",
+          kbd_found, mouse_found);
     return kbd_found && mouse_found;
 }
 
