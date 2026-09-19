@@ -393,9 +393,13 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
     Print(L"BRIDGE-DBG: obs: mmio=%016llX cap_len=%d rt_off=%08X\n",
           (unsigned long long)mmio, cap_len, rt_off);
 
-    /* ERSTBA at runtime offset 0x10 (low), 0x14 (high). */
-    erst_addr = ((UINT64)xhci_mmio_read32(mmio, rt_off + 0x14) << 32) |
-                xhci_mmio_read32(mmio, rt_off + 0x10);
+    /* ERSTBA at runtime offset 0x30 (low), 0x34 (high). The runtime
+     * register space (base = mmio + RTSOFF) is: MFINDEX at 0x00, then
+     * Interrupter 0's block at 0x20 (IMAN 0x20, IMOD 0x24, ERSTSZ 0x28,
+     * ERSTBA 0x30/0x34, ERDP 0x38/0x3C). Offsets 0x10/0x14 are in the
+     * reserved gap and always read 0. */
+    erst_addr = ((UINT64)xhci_mmio_read32(mmio, rt_off + 0x34) << 32) |
+                xhci_mmio_read32(mmio, rt_off + 0x30);
     Print(L"BRIDGE-DBG: obs: ERSTBA=%016llX\n", (unsigned long long)erst_addr);
     if (erst_addr == 0) {
         Print(L"BRIDGE-DBG: obs: ERSTBA==0 (event ring not set up)\n");

@@ -475,9 +475,13 @@ static BOOLEAN
 xhci_setup_rings(XHCI *xhci)
 {
     volatile UINT32 *crcr = &xhci->op[XHCI_OP_CRCR / 4];
-    volatile UINT32 *erstsz = &xhci->rt[0x08 / 4];
-    volatile UINT32 *erstba = &xhci->rt[0x10 / 4];
-    volatile UINT32 *erdp   = &xhci->rt[0x18 / 4];
+    /* Runtime register space (base = mmio + RTSOFF): MFINDEX at 0x00, then
+     * Interrupter 0's block at 0x20 (IMAN 0x20, IMOD 0x24, ERSTSZ 0x28,
+     * ERSTBA 0x30/0x34, ERDP 0x38/0x3C). xhci->rt points at the runtime
+     * base, so use the absolute runtime offsets. */
+    volatile UINT32 *erstsz = &xhci->rt[0x28 / 4];
+    volatile UINT32 *erstba = &xhci->rt[0x30 / 4];
+    volatile UINT32 *erdp   = &xhci->rt[0x38 / 4];
     UINT64 cmd_ring_addr, erst_addr, evt_ring_addr;
     UINTN i;
 
@@ -688,10 +692,10 @@ xhci_poll_transfer_event(XHCI *xhci, TRB *out)
         g_evt_ring_deq = (g_evt_ring_deq + 1) % EVT_RING_SIZE;
         if (g_evt_ring_deq == 0)
             g_evt_ring_cycle ^= 1;
-        /* Update ERDP. */
-        xhci_write32(&xhci->rt[0x18 / 4],
+        /* Update ERDP (runtime offset 0x38/0x3C). */
+        xhci_write32(&xhci->rt[0x38 / 4],
                      (UINT32)((UINT64)(UINTN)g_evt_ring & 0xFFFFFFFFu));
-        xhci_write32(&xhci->rt[0x1C / 4],
+        xhci_write32(&xhci->rt[0x3C / 4],
                      (UINT32)((UINT64)(UINTN)g_evt_ring >> 32));
         return TRUE;
     }
@@ -925,8 +929,9 @@ bridge_takeover_poll(const XHCI_OBSERVER *obs)
     if (g_obs_deq == 0)
         g_obs_cycle ^= 1;
     erdp = obs->event_ring_addr + (UINT64)g_obs_deq * sizeof(TRB);
-    xhci_write32(&g_xhci.rt[0x18 / 4], (UINT32)(erdp & 0xFFFFFFFFu));
-    xhci_write32(&g_xhci.rt[0x1C / 4], (UINT32)(erdp >> 32));
+    /* ERDP at runtime offset 0x38/0x3C. */
+    xhci_write32(&g_xhci.rt[0x38 / 4], (UINT32)(erdp & 0xFFFFFFFFu));
+    xhci_write32(&g_xhci.rt[0x3C / 4], (UINT32)(erdp >> 32));
 }
 
 /* ------------------------------------------------------------------ */
