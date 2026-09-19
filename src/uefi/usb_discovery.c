@@ -17,6 +17,7 @@
 #include "uefi.h"
 #include "efiusb.h"
 #include "../bridge/usb_topology.h"
+#include "../bridge/xhci_observer.h"
 
 /* The discovered fixed topology. U1 fills this; U3 copies it into the
  * reserved region and publishes its address (see usb_topology.h). */
@@ -338,6 +339,132 @@ record_root_hub_ports(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* XHCI ring extraction (read-only passive observer).                  */
+/*                                                                     */
+/* Before ExitBootServices, the bridge AP must NOT write to the xHCI   */
+/* controller (the BSP's XhciDxe driver owns it). Instead, the BSP     */
+/* extracts the physical addresses of UEFI's xHCI event ring and the   */
+/* keyboard/mouse transfer rings (all read-only), stores them in the   */
+/* reserved page, and passes them to the AP via the StartupThisAP       */
+/* procedure argument. The AP then polls them read-only, duplicating    */
+/* packets into VIRTUAL_PS2_BASE.                                      */
+/*                                                                     */
+/* Event ring:  runtime ERSTBA -> ERST[0] -> segment base + size.      */
+/* Transfer rings: op DCBAAP -> DCBAA -> device context -> endpoint    */
+/* context TR Dequeue Pointer, matched to kbd/mouse by root-hub port.  */
+/* ------------------------------------------------------------------ */
+
+/* Read a 32-bit XHCI MMIO register at an absolute offset from the MMIO
+ * base, via the EFI_PCI_IO_PROTOCOL Mem.Read accessor (BAR0). Read-only.
+ * Reuses xhci_cap_read32's safe access path (no direct MMIO dereference
+ * that could hang on real hardware). */
+static UINT32
+xhci_mmio_read32(UINT64 mmio_base, UINT64 offset)
+{
+    return xhci_cap_read32(mmio_base, (UINT32)offset);
+}
+
+/* Extract the UEFI xHCI event ring and kbd/mouse transfer ring addresses
+ * from the xHCI MMIO registers (read-only). Fills *obs. Returns TRUE on
+ * success (both rings located). */
+static BOOLEAN
+extract_xhci_observer(XHCI_OBSERVER *obs)
+{
+    UINT64 mmio = g_xhci_mmio_base;
+    UINT32 cap_len = g_xhci_cap_len;
+    UINT32 rt_off;
+    UINT64 erst_addr;
+    UINT64 evt_addr;
+    UINT32 evt_size;
+    UINT64 dcbaa_addr;
+    UINT32 hcsparams1;
+    UINT32 max_slots;
+    UINT32 slot;
+    BOOLEAN kbd_found = FALSE;
+    BOOLEAN mouse_found = FALSE;
+
+    if (mmio == 0)
+        return FALSE;
+
+    /* Runtime register base = mmio + RTSOFF (capability offset 0x18). */
+    rt_off = xhci_cap_read32(mmio, 0x18) & 0xFFFFFFF0u;
+
+    /* ERSTBA at runtime offset 0x10 (low), 0x14 (high). */
+    erst_addr = ((UINT64)xhci_mmio_read32(mmio, rt_off + 0x14) << 32) |
+                xhci_mmio_read32(mmio, rt_off + 0x10);
+    if (erst_addr == 0)
+        return FALSE;
+
+    /* ERST[0]: seg_addr_low at +0, seg_addr_high at +4, seg_size at +8.
+     * The ERST is in memory (allocated by XhciDxe), so a direct read is
+     * safe and read-only. */
+    {
+        volatile UINT32 *erst = (volatile UINT32 *)(UINTN)erst_addr;
+        evt_addr = ((UINT64)erst[1] << 32) | erst[0];
+        evt_size = erst[2];
+    }
+    if (evt_addr == 0 || evt_size == 0)
+        return FALSE;
+
+    obs->event_ring_addr = evt_addr;
+    obs->event_ring_size = evt_size;
+
+    /* DCBAAP at op offset 0x30 (low), 0x34 (high). */
+    dcbaa_addr = ((UINT64)xhci_mmio_read32(mmio, cap_len + 0x34) << 32) |
+                 xhci_mmio_read32(mmio, cap_len + 0x30);
+    if (dcbaa_addr == 0)
+        return FALSE;
+
+    hcsparams1 = xhci_cap_read32(mmio, 0x04);
+    max_slots = hcsparams1 & 0xFF;
+
+    /* Walk the slots, match by root-hub port number (slot context DWORD 1
+     * bits 7:0). The device contexts are in memory (allocated by XhciDxe),
+     * so direct reads are safe and read-only. */
+    for (slot = 1; slot <= max_slots; slot++) {
+        UINT64 dev_ctx_addr;
+        volatile UINT32 *slot_ctx;
+        UINT32 port;
+        UINT8 ep_num;
+        UINT32 ep_index;
+        volatile UINT32 *ep_ctx;
+        UINT64 tr_dequeue;
+
+        dev_ctx_addr = ((volatile UINT64 *)(UINTN)dcbaa_addr)[slot];
+        if (dev_ctx_addr == 0)
+            continue;
+
+        slot_ctx = (volatile UINT32 *)(UINTN)dev_ctx_addr;
+        port = slot_ctx[1] & 0xFF;   /* Root Hub Port Number (bits 7:0) */
+
+        if (port == g_usb_topology.kbd.port && !kbd_found) {
+            ep_num = g_usb_topology.kbd.endpoint & 0x0F;
+            ep_index = 2 * ep_num + 1;   /* IN endpoint context index */
+            ep_ctx = (volatile UINT32 *)(UINTN)
+                (dev_ctx_addr + 32 + (UINT64)ep_index * 32);
+            tr_dequeue = ((UINT64)ep_ctx[3] << 32) | ep_ctx[2];
+            obs->kbd_tr_addr = tr_dequeue;
+            obs->kbd_slot = slot;
+            kbd_found = TRUE;
+        } else if (port == g_usb_topology.mouse.port && !mouse_found) {
+            ep_num = g_usb_topology.mouse.endpoint & 0x0F;
+            ep_index = 2 * ep_num + 1;   /* IN endpoint context index */
+            ep_ctx = (volatile UINT32 *)(UINTN)
+                (dev_ctx_addr + 32 + (UINT64)ep_index * 32);
+            tr_dequeue = ((UINT64)ep_ctx[3] << 32) | ep_ctx[2];
+            obs->mouse_tr_addr = tr_dequeue;
+            obs->mouse_slot = slot;
+            mouse_found = TRUE;
+        }
+
+        if (kbd_found && mouse_found)
+            break;
+    }
+
+    return kbd_found && mouse_found;
+}
+
+/* ------------------------------------------------------------------ */
 /* uefi_discover_usb(): find the single boot-protocol keyboard and      */
 /* mouse, record their interrupt IN endpoints into g_usb_topology.      */
 /* ------------------------------------------------------------------ */
@@ -491,6 +618,26 @@ uefi_discover_usb(void)
 
     /* Record the real root-hub port numbers for the slot context. */
     record_root_hub_ports();
+
+    /* Extract the UEFI xHCI event ring + kbd/mouse transfer ring addresses
+     * (read-only) and store them in the reserved page for the bridge AP's
+     * pre-ExitBootServices passive observer. Best-effort: if the rings are
+     * not yet set up, the observer simply idles (read-only) and the full
+     * bring-up happens after ExitBootServices. */
+    {
+        XHCI_OBSERVER *obs = (XHCI_OBSERVER *)(UINTN)XHCI_OBSERVER_ADDR;
+        if (extract_xhci_observer(obs)) {
+            Print(L"BRIDGE-DBG: discover: observer evt=%016llX size=%d "
+                  L"kbd_tr=%016llX mouse_tr=%016llX\n",
+                  (unsigned long long)obs->event_ring_addr,
+                  obs->event_ring_size,
+                  (unsigned long long)obs->kbd_tr_addr,
+                  (unsigned long long)obs->mouse_tr_addr);
+        } else {
+            Print(L"BRIDGE-DBG: discover: observer extraction failed "
+                  L"(rings not ready); AP will idle read-only\n");
+        }
+    }
 
     return EFI_SUCCESS;
 }

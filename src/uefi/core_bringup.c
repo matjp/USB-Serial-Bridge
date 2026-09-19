@@ -29,6 +29,7 @@
 #include "uefi.h"
 #include "../bridge/bridge.h"
 #include "../bridge/usb_topology.h"
+#include "../bridge/xhci_observer.h"
 
 /* ------------------------------------------------------------------ */
 /* EFI_MP_SERVICES_PROTOCOL (portability shim).                        */
@@ -681,7 +682,12 @@ uefi_bringup_highest_core(void)
         ap_done_event,    /* WaitEvent: non-NULL = non-blocking (returns
                            * immediately after dispatching the AP) */
         1000000,          /* TimeoutInMicroseconds: 1 s */
-        NULL,             /* ProcedureArgument */
+        /* ProcedureArgument: pointer to the XHCI_OBSERVER in the reserved
+         * page (extracted on the BSP from UEFI's xHCI rings). The AP reads
+         * it read-only to poll UEFI's event ring before ExitBootServices.
+         * The reserved page is identity-mapped in the AP's page tables, so
+         * the pointer stays valid after the AP detaches. */
+        (VOID *)(UINTN)XHCI_OBSERVER_ADDR,
         NULL);            /* Finished */
 
     /* The event is never signaled (the AP never finishes), so we do not wait

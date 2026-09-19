@@ -19,10 +19,23 @@
 
 #include "bridge.h"
 #include "tdm.h"
+#include "xhci_observer.h"
 
 void
 bridge_entry(void)
 {
+    /* Before ExitBootServices, the bridge AP must be a completely PASSIVE
+     * data observer of the xHCI rings. The UEFI firmware is single-threaded
+     * on the BSP and its XhciDxe driver owns the xHCI state machine; if the
+     * AP wrote to the xHCI MMIO operational registers or PCI config space,
+     * it would race with the BSP and trigger a #GP / halt / failed
+     * ExitBootServices. The observer (bridge_observer_poll) reads UEFI's
+     * event ring read-only and duplicates packets into VIRTUAL_PS2_BASE,
+     * never writing to the controller. The full bring-up (bridge_poll_usb)
+     * is deferred until after ExitBootServices, when the AP becomes the
+     * sole owner of the xHCI rings. */
+    const XHCI_OBSERVER *obs = (const XHCI_OBSERVER *)(UINTN)XHCI_OBSERVER_ADDR;
+
     for (;;) {
         /* If the USB controller is unusable (non-XHCI>=1.0 or a fatal
          * fault), halt cleanly in an idle loop. */
@@ -31,8 +44,9 @@ bridge_entry(void)
                 __asm__ __volatile__("hlt");
         }
 
-        /* Poll the two interrupt IN endpoints (B1). */
-        bridge_poll_usb();
+        /* Read-only passive observer (B1, pre-EBS): poll UEFI's event ring
+         * and fill the raw HID reports. No writes to the xHCI controller. */
+        bridge_observer_poll(obs);
 
         /* Parse HID reports (B2) and translate to PS/2 (B3). */
         bridge_parse_hid();

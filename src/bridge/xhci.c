@@ -26,6 +26,7 @@
 #include "usb_topology.h"
 #include "xhci_fault.h"
 #include "xhci_status.h"
+#include "xhci_observer.h"
 
 /* Freestanding firmware: <efi.h> does not pull in <string.h>. Declare the
  * libc memset we use to clear the fault record (host build provides it). */
@@ -224,6 +225,19 @@ static XHCI_FAULT g_xhci_fault_rec;
 
 /* One-time bring-up latch (file scope so the host test can reset it). */
 static BOOLEAN g_xhci_initialized = FALSE;
+
+/* ------------------------------------------------------------------ */
+/* Read-only passive observer state (pre-ExitBootServices).            */
+/*                                                                     */
+/* Before ExitBootServices, the bridge AP must NOT write to the xHCI   */
+/* controller (the BSP's XhciDxe driver owns it). Instead, the AP      */
+/* polls UEFI's event ring read-only and duplicates packets into the   */
+/* virtual PS/2 region. The AP tracks its OWN event-ring dequeue index */
+/* and cycle bit in memory only; it NEVER writes them back to the xHCI */
+/* ERDP register, so UEFI on the BSP remains the sole owner.           */
+/* ------------------------------------------------------------------ */
+static UINT32 g_obs_deq;    /* AP's own event-ring dequeue index */
+static UINT32 g_obs_cycle;  /* AP's own event-ring cycle bit */
 
 #ifdef BRIDGE_DEBUG
 /* Debug builds only: a success record capturing the ACTUAL XHCI hardware
@@ -789,6 +803,90 @@ bridge_poll_usb(void)
             xhci_rearm_transfer(&g_xhci, &g_tr_mouse, topo->mouse.endpoint, 2);
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* bridge_observer_poll(): read-only passive observer (pre-EBS).       */
+/*                                                                     */
+/* Before ExitBootServices, the bridge AP must NOT write to the xHCI   */
+/* controller (the BSP's XhciDxe driver owns it). This function polls  */
+/* UEFI's event ring READ-ONLY, detects completed transfer events, and */
+/* fills the raw HID reports (g_raw_kbd / g_raw_mouse) so the rest of  */
+/* the bridge pipeline (parse -> translate -> write to VIRTUAL_PS2)    */
+/* runs unchanged. It NEVER writes to xHCI registers: no ERDP update,  */
+/* no doorbell, no rearm. UEFI on the BSP remains the sole owner.      */
+/*                                                                     */
+/* The observer tracks its OWN event-ring dequeue index + cycle bit in */
+/* memory only. It advances only when it observes a valid event, so it */
+/* stays in sync with the controller's production without touching the */
+/* controller's state.                                                 */
+/* ------------------------------------------------------------------ */
+void
+bridge_observer_poll(const XHCI_OBSERVER *obs)
+{
+    TRB *evt;
+    UINT32 cc;
+    UINT64 trb_ptr;
+    UINT8 *buf;
+    UINTN len;
+
+    if (g_xhci_fatal)
+        return;
+
+    if (obs == NULL || obs->event_ring_addr == 0 || obs->event_ring_size == 0)
+        return;
+
+    /* Read the event ring TRB at our tracked dequeue index. */
+    evt = (TRB *)(UINTN)(obs->event_ring_addr +
+                         (UINT64)g_obs_deq * sizeof(TRB));
+
+    /* Cycle bit mismatch: no new event from the controller. */
+    if (((evt->field3 >> 0) & 1u) != g_obs_cycle)
+        return;
+
+    if (((evt->field3 >> 6) & 0x3F) == TRB_TYPE_TRANSFER_EVENT) {
+        cc = (evt->field3 >> 24) & 0xFF;
+        if (cc == CC_SUCCESS || cc == CC_SHORT_PACKET) {
+            trb_ptr = ((UINT64)evt->field1 << 32) | evt->field0;
+
+            /* Match the completed TRB to the kbd/mouse transfer ring by
+             * page-aligned base (a transfer ring fits within one page). */
+            if ((trb_ptr & ~0xFFFULL) == (obs->kbd_tr_addr & ~0xFFFULL)) {
+                TRB *ktr = (TRB *)(UINTN)trb_ptr;
+                buf = (UINT8 *)(UINTN)(((UINT64)ktr->field1 << 32) |
+                                       ktr->field0);
+                len = ktr->field2 & 0x1FFFF;
+                if (len > HID_KBD_REPORT_SIZE)
+                    len = HID_KBD_REPORT_SIZE;
+                g_raw_kbd.modifier = buf[0];
+                g_raw_kbd.reserved = buf[1];
+                g_raw_kbd.key[0]   = buf[2];
+                g_raw_kbd.key[1]   = buf[3];
+                g_raw_kbd.key[2]   = buf[4];
+                g_raw_kbd.key[3]   = buf[5];
+                g_raw_kbd.key[4]   = buf[6];
+                g_raw_kbd.key[5]   = buf[7];
+                g_kbd_valid = TRUE;
+            } else if ((trb_ptr & ~0xFFFULL) ==
+                       (obs->mouse_tr_addr & ~0xFFFULL)) {
+                TRB *mtr = (TRB *)(UINTN)trb_ptr;
+                buf = (UINT8 *)(UINTN)(((UINT64)mtr->field1 << 32) |
+                                       mtr->field0);
+                len = mtr->field2 & 0x1FFFF;
+                if (len > HID_MOUSE_REPORT_SIZE)
+                    len = HID_MOUSE_REPORT_SIZE;
+                g_raw_mouse.buttons = buf[0];
+                g_raw_mouse.dx      = (INT8)buf[1];
+                g_raw_mouse.dy      = (INT8)buf[2];
+                g_mouse_valid = TRUE;
+            }
+        }
+    }
+
+    /* Advance our OWN dequeue index (memory only; never write ERDP). */
+    g_obs_deq = (g_obs_deq + 1) % obs->event_ring_size;
+    if (g_obs_deq == 0)
+        g_obs_cycle ^= 1;
 }
 
 /* Return TRUE if the USB controller is unusable (non-XHCI>=1.0 or a fatal

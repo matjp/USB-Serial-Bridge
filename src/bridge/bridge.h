@@ -11,9 +11,16 @@
 #define BRIDGE_H
 
 #include <efi.h>
+#include "xhci_observer.h"
 
 /* B1: Poll the two interrupt IN endpoints, produce raw HID reports. */
 void bridge_poll_usb(void);
+
+/* B1: Read-only passive observer (pre-ExitBootServices). Polls UEFI's
+ * xHCI event ring read-only and fills the raw HID reports, duplicating
+ * packet data into the virtual PS/2 region. NEVER writes to the xHCI
+ * controller (the BSP's XhciDxe driver owns it before EBS). */
+void bridge_observer_poll(const XHCI_OBSERVER *obs);
 
 /* B1: Return TRUE if the USB controller is unusable (non-XHCI>=1.0 or a
  * fatal fault). The bridge halts cleanly when this is set. */
