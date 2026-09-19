@@ -21,6 +21,12 @@
 #include "tdm.h"
 #include "xhci_observer.h"
 
+/* Post-ExitBootServices flag, set by the BSP's ExitBootServices
+ * notification (see core_bringup.c). Before EBS the bridge AP must remain
+ * a completely PASSIVE read-only observer of the xHCI rings; only after
+ * EBS may it take over the rings (write ERDP + re-arm + doorbell). */
+extern volatile UINT8 g_ebs_occurred;
+
 void
 bridge_entry(void)
 {
@@ -53,8 +59,15 @@ bridge_entry(void)
         /* After ExitBootServices, the AP is the sole owner: take over UEFI's
          * rings (write ERDP + re-arm + doorbell). This is the production
          * post-EBS path; bridge_poll_usb() (full from-scratch bring-up) is
-         * only kept for the host fault-injection test. */
-        bridge_takeover_poll(obs);
+         * only kept for the host fault-injection test.
+         *
+         * CRITICAL: before ExitBootServices the BSP's XhciDxe driver owns
+         * the xHCI controller. Writing ERDP / ringing doorbells from the AP
+         * before EBS races with the BSP and corrupts the controller state
+         * (observed as a #PF on the AP). The AP must therefore remain a
+         * passive read-only observer until g_ebs_occurred is set. */
+        if (g_ebs_occurred)
+            bridge_takeover_poll(obs);
 
         /* Parse HID reports (B2) and translate to PS/2 (B3). */
         bridge_parse_hid();

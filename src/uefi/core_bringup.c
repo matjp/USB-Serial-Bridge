@@ -196,6 +196,16 @@ volatile UINT8 g_ap_booted = 0;
  * reason as g_ap_booted. */
 volatile UINT8 g_ap_detached = 0;
 
+/* Post-ExitBootServices flag: set to 1 by the BSP's ExitBootServices
+ * notification (exit_boot_services_notify) right before the firmware
+ * tears down. The bridge AP reads this on every poll iteration: before
+ * EBS it must remain a completely PASSIVE read-only observer of the xHCI
+ * rings (bridge_observer_poll) and must NOT write to the controller
+ * (bridge_takeover_poll) because the BSP's XhciDxe driver owns it. Only
+ * after EBS does the AP become the sole owner and take over the rings.
+ * Global (not static) for the same relocation reason as g_ap_detached. */
+volatile UINT8 g_ebs_occurred = 0;
+
 /* APIC ID of the bridge AP, captured during bring-up (from
  * EFI_PROCESSOR_INFORMATION.ProcessorId). Used by the ACPI MADT patch
  * (rule 4) to mark the bridge core disabled so the OS believes it is
@@ -485,6 +495,11 @@ exit_boot_services_notify(EFI_EVENT event, VOID *context)
      * masking its Local APIC, and disabling interrupts. */
     while (!g_ap_detached && spins < EBS_AP_DETACH_SPIN)
         spins++;
+
+    /* Signal the bridge AP that ExitBootServices is happening: it may now
+     * take over the xHCI rings (write ERDP + re-arm + doorbell). Before
+     * this flag is set, the AP must remain a passive read-only observer. */
+    g_ebs_occurred = 1;
 
     /* The AP is now self-sustaining; the firmware may proceed with the
      * ExitBootServices teardown. */

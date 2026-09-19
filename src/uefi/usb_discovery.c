@@ -445,6 +445,8 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
         UINT64 dev_ctx_addr;
         volatile UINT32 *slot_ctx;
         UINT32 port;
+        UINT32 port_candidates[3];
+        UINT32 ci;
         UINT8 ep_num;
         UINT32 ep_index;
         volatile UINT32 *ep_ctx;
@@ -455,7 +457,28 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
             continue;
 
         slot_ctx = (volatile UINT32 *)(UINTN)dev_ctx_addr;
-        port = slot_ctx[1] & 0xFF;   /* Root Hub Port Number (bits 7:0) */
+
+        /* The Root Hub Port Number lives in different bit positions
+         * depending on the xHCI driver that programmed the slot context:
+         *   - DWORD 0 bits 19:16 (xHCI spec dev_info)
+         *   - DWORD 1 bits 7:0   (Linux xhci-hcd dev_info2)
+         *   - DWORD 1 bits 16:23 (EDK2 XhciDxe RootHubPortNum bitfield)
+         * OVMF uses EDK2's XhciDxe, so the EDK2 position is the expected
+         * one, but we accept any of the three so the match is robust.
+         * We only accept a candidate that actually equals the kbd or mouse
+         * root-hub port, so a stray non-zero field (e.g. the Speed bits in
+         * DWORD 0) can never cause a false match. */
+        port_candidates[0] = (slot_ctx[0] >> 16) & 0xFF;
+        port_candidates[1] = slot_ctx[1] & 0xFF;
+        port_candidates[2] = (slot_ctx[1] >> 16) & 0xFF;
+        port = 0;
+        for (ci = 0; ci < 3; ci++) {
+            if (port_candidates[ci] == g_usb_topology.kbd.port ||
+                port_candidates[ci] == g_usb_topology.mouse.port) {
+                port = port_candidates[ci];
+                break;
+            }
+        }
 
         Print(L"BRIDGE-DBG: obs: slot %d dev_ctx=%016llX port=%d "
               L"(kbd.port=%d mouse.port=%d)\\n",
