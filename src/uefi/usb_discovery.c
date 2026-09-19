@@ -487,9 +487,15 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
 
         if (port == g_usb_topology.kbd.port && !kbd_found) {
             ep_num = g_usb_topology.kbd.endpoint & 0x0F;
-            ep_index = 2 * ep_num + 1;   /* IN endpoint context index */
+            /* Dci (device context index) for an IN endpoint: 2*N+1. EDK2's
+             * DEVICE_CONTEXT stores the endpoint contexts in an EP[31] array
+             * indexed by Dci-1 (EP[0] is Dci 1 = EP0), so the endpoint
+             * context for Dci sits at offset 32 + (Dci-1)*32, NOT 32 + Dci*32.
+             * Using Dci directly read EP[3] (Dci 4 = EP2 OUT, unconfigured)
+             * and yielded a zero TR Dequeue Pointer. */
+            ep_index = 2 * ep_num + 1;   /* Dci */
             ep_ctx = (volatile UINT32 *)(UINTN)
-                (dev_ctx_addr + 32 + (UINT64)ep_index * 32);
+                (dev_ctx_addr + 32 + (UINT64)(ep_index - 1) * 32);
             tr_dequeue = ((UINT64)ep_ctx[3] << 32) | ep_ctx[2];
             obs->kbd_tr_addr = tr_dequeue;
             obs->kbd_slot = slot;
@@ -498,9 +504,15 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
                   slot, ep_num, (unsigned long long)tr_dequeue);
         } else if (port == g_usb_topology.mouse.port && !mouse_found) {
             ep_num = g_usb_topology.mouse.endpoint & 0x0F;
-            ep_index = 2 * ep_num + 1;   /* IN endpoint context index */
+            /* Dci (device context index) for an IN endpoint: 2*N+1. EDK2's
+             * DEVICE_CONTEXT stores the endpoint contexts in an EP[31] array
+             * indexed by Dci-1 (EP[0] is Dci 1 = EP0), so the endpoint
+             * context for Dci sits at offset 32 + (Dci-1)*32, NOT 32 + Dci*32.
+             * Using Dci directly read EP[3] (Dci 4 = EP2 OUT, unconfigured)
+             * and yielded a zero TR Dequeue Pointer. */
+            ep_index = 2 * ep_num + 1;   /* Dci */
             ep_ctx = (volatile UINT32 *)(UINTN)
-                (dev_ctx_addr + 32 + (UINT64)ep_index * 32);
+                (dev_ctx_addr + 32 + (UINT64)(ep_index - 1) * 32);
             tr_dequeue = ((UINT64)ep_ctx[3] << 32) | ep_ctx[2];
             obs->mouse_tr_addr = tr_dequeue;
             obs->mouse_slot = slot;

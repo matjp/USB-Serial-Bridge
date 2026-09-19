@@ -72,7 +72,26 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         goto done;
     }
 
-    /* 4. Bring up the highest core via SIPI, loading the bridge code (U2). */
+    /* 4. Retry the XHCI ring extraction BEFORE bringing up the bridge AP.
+     *     The first attempt (inside uefi_discover_usb) runs too early: the
+     *     firmware's XhciDxe driver has not yet programmed ERSTBA, so the
+     *     event ring reads as 0 and the observer extraction fails. By now
+     *     XhciDxe has had time to initialize the controller, so retry with
+     *     a bounded delay until the event ring + kbd/mouse transfer rings
+     *     are visible.
+     *
+     *     CRITICAL ORDERING: the observer must be FULLY populated before the
+     *     AP is started. If the AP boots first, it begins polling an
+     *     incomplete observer (event ring / transfer ring addresses not yet
+     *     valid) and can never recover. Doing all setup here, before the AP
+     *     starts, guarantees the post-ExitBootServices takeover is stable:
+     *     the AP only ever reads a complete, valid observer. */
+    Print(L"BRIDGE-DBG: calling uefi_extract_observer (retry)\n");
+    uefi_extract_observer();
+    Print(L"BRIDGE-DBG: uefi_extract_observer returned\n");
+
+    /* 5. Bring up the highest core via SIPI, loading the bridge code (U2).
+     *     The AP starts polling the already-populated observer. */
     Print(L"BRIDGE-DBG: calling uefi_bringup_highest_core\n");
     status = uefi_bringup_highest_core();
     Print(L"BRIDGE-DBG: uefi_bringup_highest_core returned %r\n", status);
@@ -81,19 +100,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         goto done;
     }
 
-    /* 4a. Retry the XHCI ring extraction. The first attempt (inside
-     *     uefi_discover_usb) runs too early: the firmware's XhciDxe driver
-     *     has not yet programmed ERSTBA, so the event ring reads as 0 and
-     *     the observer extraction fails. By now XhciDxe has had time to
-     *     initialize the controller, so retry with a bounded delay until
-     *     the event ring + kbd/mouse transfer rings are visible. The bridge
-     *     AP reads the observer from the shared reserved page on every poll,
-     *     so it picks up the populated data automatically. */
-    Print(L"BRIDGE-DBG: calling uefi_extract_observer (retry)\n");
-    uefi_extract_observer();
-    Print(L"BRIDGE-DBG: uefi_extract_observer returned\n");
-
-    /* 4a. Register the ExitBootServices notification. When the firmware
+    /* 5a. Register the ExitBootServices notification. When the firmware
      *     tears down boot services, the notification runs on the BSP and
      *     waits for the bridge AP to finish detaching (independent page
      *     tables in CR3, Local APIC masked, interrupts off) so the AP
