@@ -187,6 +187,20 @@ UINT64 g_bridge_stack_top;
  * normal data-section relocation. */
 volatile UINT8 g_ap_booted = 0;
 
+/* Detach-status flag: set to 1 by the AP procedure AFTER bridge_ap_detach()
+ * completes (independent page tables loaded into CR3, Local APIC interrupts
+ * masked, interrupts disabled). The ExitBootServices notification on the BSP
+ * spins on this flag so it never lets the firmware tear down until the AP is
+ * fully detached (rule 1). Global (not static) for the same relocation
+ * reason as g_ap_booted. */
+volatile UINT8 g_ap_detached = 0;
+
+/* APIC ID of the bridge AP, captured during bring-up (from
+ * EFI_PROCESSOR_INFORMATION.ProcessorId). Used by the ACPI MADT patch
+ * (rule 4) to mark the bridge core disabled so the OS believes it is
+ * missing/dead. Global (not static) for the same relocation reason. */
+UINT32 g_bridge_apic_id = 0xFFFFFFFFu;
+
 /* ------------------------------------------------------------------ */
 /* No-op event notification function.                                   */
 /*                                                                     */
@@ -275,6 +289,62 @@ ap_map_2mb(AP_PAGE_TABLES *pt, UINT64 phys)
     pd[pd_idx]         = phys | AP_PT_PRESENT | AP_PT_WRITABLE | AP_PT_PS;
 }
 
+/* Mask every Local APIC LVT interrupt on the current core.
+ *
+ * Rule 1 of the ExitBootServices handoff: right before the firmware tears
+ * down, it may send an INIT IPI or an SMI to reset a processor core that is
+ * still "owned" by the UEFI MP protocol. To prevent that, the bridge AP must
+ * mask/disable its Local APIC interrupts so the firmware cannot deliver an
+ * interrupt that would disturb the running bridge.
+ *
+ * The Local APIC base is read from the IA32_APIC_BASE MSR (0x1B). Each LVT
+ * entry (offsets 0x300..0x360) has a mask bit at bit 16; setting it disables
+ * that interrupt source. We mask all of them (CMCI, Timer, Thermal, PerfMon,
+ * LINT0, LINT1, Error). */
+#define IA32_APIC_BASE_MSR  0x1Bu
+#define APIC_LVT_MASK       (1u << 16)
+#define APIC_LVT_CMCI       0x300u
+#define APIC_LVT_TIMER      0x310u
+#define APIC_LVT_THERMAL    0x320u
+#define APIC_LVT_PERFMON    0x330u
+#define APIC_LVT_LINT0      0x340u
+#define APIC_LVT_LINT1      0x350u
+#define APIC_LVT_ERROR      0x360u
+
+static void
+ap_mask_local_apic_interrupts(void)
+{
+    UINT32 lo;
+    UINT32 hi;
+    UINT64 apic_base_msr;
+    volatile UINT32 *lvt;
+    UINT32 lvt_offsets[7];
+    UINTN i;
+
+    /* Read the Local APIC base from IA32_APIC_BASE (MSR 0x1B). */
+    __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi)
+                         : "c"(IA32_APIC_BASE_MSR));
+    apic_base_msr = ((UINT64)hi << 32) | lo;
+
+    /* The APIC base is bits 12..35 of the MSR. */
+    apic_base_msr &= 0xFFFFFFFFF000ULL;
+    if (apic_base_msr == 0)
+        return;   /* No Local APIC; nothing to mask. */
+
+    lvt = (volatile UINT32 *)(UINTN)apic_base_msr;
+
+    lvt_offsets[0] = APIC_LVT_CMCI;
+    lvt_offsets[1] = APIC_LVT_TIMER;
+    lvt_offsets[2] = APIC_LVT_THERMAL;
+    lvt_offsets[3] = APIC_LVT_PERFMON;
+    lvt_offsets[4] = APIC_LVT_LINT0;
+    lvt_offsets[5] = APIC_LVT_LINT1;
+    lvt_offsets[6] = APIC_LVT_ERROR;
+
+    for (i = 0; i < 7; i++)
+        lvt[lvt_offsets[i] / 4] |= APIC_LVT_MASK;
+}
+
 /* Detach the AP from UEFI: disable interrupts, build independent page
  * tables, and switch CR3. Runs on the AP before bridge_entry(). */
 static void
@@ -294,11 +364,17 @@ bridge_ap_detach(void)
      *    interfere with the BSP's UEFI environment. */
     __asm__ __volatile__("cli" : : : "memory");
 
+    /* 1a. Mask the Local APIC LVT interrupts so the firmware cannot deliver
+     *     an INIT IPI / SMI / interrupt to this core during the
+     *     ExitBootServices teardown (rule 1). */
+    ap_mask_local_apic_interrupts();
+
     /* 2. Allocate page-aligned memory for the independent page tables
-     *    (8 pages = 32 KiB). EfiReservedMemoryType so the OS never reclaims
-     *    them after ExitBootServices. */
+     *    (8 pages = 32 KiB). EfiRuntimeServicesData so the firmware strictly
+     *    preserves them after ExitBootServices (unlike boot-services
+     *    memory, runtime-services ranges are never reclaimed). */
     status = uefi_call_wrapper(
-        BS->AllocatePages, 4, AllocateAnyPages, EfiReservedMemoryType,
+        BS->AllocatePages, 4, AllocateAnyPages, EfiRuntimeServicesData,
         8, &pt_addr);
     if (EFI_ERROR(status)) {
         return;   /* Cannot detach; bridge_entry runs under UEFI's tables. */
@@ -357,11 +433,81 @@ bridge_ap_entry(VOID *procedure_argument)
      * environment and survives ExitBootServices. */
     bridge_ap_detach();
 
+    /* Signal the BSP that the AP is fully detached (page tables in CR3,
+     * Local APIC masked, interrupts off). The ExitBootServices notification
+     * on the BSP waits for this before allowing teardown. */
+    g_ap_detached = 1;
+
     /* Run the bridge. This never returns (bridge_entry loops forever). */
     bridge_entry();
 
     /* Not reached. */
     (VOID)procedure_argument;
+}
+
+/* ------------------------------------------------------------------ */
+/* ExitBootServices handoff (rule 1).                                  */
+/*                                                                     */
+/* The bridge AP is structurally bound to the UEFI boot environment's   */
+/* lifecycle. When the BSP calls ExitBootServices(), the firmware       */
+/* forcibly aborts the AP driver, clears its processor state, and       */
+/* parks the core (sending an INIT IPI / SMI to reset it). To survive,  */
+/* the AP must be fully detached BEFORE the firmware tears down.        */
+/*                                                                     */
+/* We register a notification on the EFI_EVENT_GROUP_EXIT_BOOT_SERVICES */
+/* event group. The notification runs on the BSP, synchronously, right  */
+/* before the firmware begins teardown. It spins (bounded) until the AP */
+/* signals g_ap_detached (page tables in CR3, Local APIC masked,        */
+/* interrupts off), guaranteeing the AP is self-sustaining before the   */
+/* firmware releases the boot services.                                 */
+/* ------------------------------------------------------------------ */
+
+/* EFI_EVENT_GROUP_EXIT_BOOT_SERVICES GUID (UEFI spec). */
+#define EFI_EVENT_GROUP_EXIT_BOOT_SERVICES_GUID \
+    { 0x27ABF055, 0xB1B8, 0x4C26, \
+      {0x80, 0x48, 0x74, 0x8F, 0x37, 0xBA, 0xA2, 0xDF} }
+
+/* Bounded spin: how many iterations to wait for the AP to detach before
+ * giving up (the notification must return; it cannot block forever). */
+#define EBS_AP_DETACH_SPIN  100000000u
+
+static VOID EFIAPI
+exit_boot_services_notify(EFI_EVENT event, VOID *context)
+{
+    UINT32 spins = 0;
+
+    (VOID)event;
+    (VOID)context;
+
+    /* Wait (bounded) for the AP to finish detaching. The AP sets
+     * g_ap_detached after loading its independent page tables into CR3,
+     * masking its Local APIC, and disabling interrupts. */
+    while (!g_ap_detached && spins < EBS_AP_DETACH_SPIN)
+        spins++;
+
+    /* The AP is now self-sustaining; the firmware may proceed with the
+     * ExitBootServices teardown. */
+}
+
+/* Register the ExitBootServices notification. Call this once, after the
+ * bridge AP has been started, so the notification can wait on the AP's
+ * detach handshake. */
+EFI_STATUS
+uefi_register_exit_boot_services_hook(void)
+{
+    EFI_GUID ebs_guid = EFI_EVENT_GROUP_EXIT_BOOT_SERVICES_GUID;
+    EFI_EVENT ebs_event = NULL;
+    EFI_STATUS status;
+
+    status = uefi_call_wrapper(
+        BS->CreateEventEx, 6, EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+        exit_boot_services_notify, NULL, &ebs_guid, &ebs_event);
+    if (EFI_ERROR(status))
+        return status;
+
+    /* The event is owned by the firmware's event group; we do not close it
+     * (closing it would deregister the notification). */
+    return EFI_SUCCESS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -452,6 +598,9 @@ uefi_bringup_highest_core(void)
         if (!found || i > highest_ap) {
             highest_ap = i;
             found = TRUE;
+            /* Capture the APIC ID (ProcessorId) of the bridge AP for the
+             * ACPI MADT patch (rule 4). */
+            g_bridge_apic_id = (UINT32)info.ProcessorId;
         }
     }
 
@@ -470,9 +619,11 @@ uefi_bringup_highest_core(void)
           num_processors, num_enabled, bsp_number, highest_ap);
 #endif
 
-    /* 4. Allocate a stack for the bridge core in the reserved region. */
+    /* 4. Allocate a stack for the bridge core. EfiRuntimeServicesData so the
+     *    firmware strictly preserves it after ExitBootServices (the AP runs
+     *    on this stack for the lifetime of the bridge). */
     status = uefi_call_wrapper(
-        BS->AllocatePages, 4, AllocateAnyPages, EfiReservedMemoryType,
+        BS->AllocatePages, 4, AllocateAnyPages, EfiRuntimeServicesData,
         BRIDGE_STACK_SIZE / 4096, &stack_addr);
     if (EFI_ERROR(status))
         return status;

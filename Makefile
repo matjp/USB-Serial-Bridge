@@ -56,6 +56,7 @@ APP_SRCS        := src/main.c \
                    src/uefi/usb_discovery.c \
                    src/uefi/core_bringup.c \
                    src/uefi/mem_reserve.c \
+                   src/uefi/madt.c \
                    src/uefi/l1_harness.c \
                    src/uefi/exception_handler.c \
                    src/uefi/log_file.c

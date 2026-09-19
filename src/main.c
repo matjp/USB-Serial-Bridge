@@ -81,6 +81,29 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         goto done;
     }
 
+    /* 4a. Register the ExitBootServices notification. When the firmware
+     *     tears down boot services, the notification runs on the BSP and
+     *     waits for the bridge AP to finish detaching (independent page
+     *     tables in CR3, Local APIC masked, interrupts off) so the AP
+     *     survives the handoff (rule 1). */
+    Print(L"BRIDGE-DBG: calling uefi_register_exit_boot_services_hook\n");
+    status = uefi_register_exit_boot_services_hook();
+    Print(L"BRIDGE-DBG: uefi_register_exit_boot_services_hook returned %r\n",
+          status);
+    if (EFI_ERROR(status)) {
+        Print(L"ERROR: ExitBootServices hook registration failed (status %r)\n",
+              status);
+        goto done;
+    }
+
+    /* 4b. Mark the bridge AP as DISABLED in the ACPI MADT so the OS believes
+     *     the core is missing/dead and never tries to bring it up (rule 4).
+     *     Best-effort: if ACPI is unavailable, the OS may still see the core,
+     *     but the bridge AP is already detached and self-sustaining. */
+    Print(L"BRIDGE-DBG: calling uefi_disable_bridge_ap_in_madt\n");
+    status = uefi_disable_bridge_ap_in_madt();
+    Print(L"BRIDGE-DBG: uefi_disable_bridge_ap_in_madt returned %r\n", status);
+
     /* Layer 1 harness: if the bridge faulted during XHCI bring-up, print a
      * one-screen diagnosis to the console and halt - never boot the OS. */
     Print(L"BRIDGE-DBG: calling uefi_check_bridge_fault\n");

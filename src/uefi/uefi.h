@@ -23,6 +23,15 @@ EFI_STATUS uefi_reserve_memory(void);
  * bridge code. */
 EFI_STATUS uefi_bringup_highest_core(void);
 
+/* U2: Register the EFI_EVENT_GROUP_EXIT_BOOT_SERVICES notification that
+ * ensures the bridge AP is fully detached (independent page tables in CR3,
+ * Local APIC masked, interrupts off) before the firmware tears down. */
+EFI_STATUS uefi_register_exit_boot_services_hook(void);
+
+/* U2: Mark the bridge AP as DISABLED in the ACPI MADT so the OS believes the
+ * core is missing/dead and never tries to bring it up (rule 4). */
+EFI_STATUS uefi_disable_bridge_ap_in_madt(void);
+
 /* Layer 1 harness: after bridge bring-up, check the XHCI fault record. If the
  * bridge faulted, print a one-screen diagnosis to ConOut and halt (never boot
  * the OS). Returns normally if the bridge is healthy. */

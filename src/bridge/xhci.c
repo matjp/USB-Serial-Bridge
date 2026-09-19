@@ -208,6 +208,14 @@ static UINT8 g_mouse_buf[HID_MOUSE_REPORT_SIZE];
 /* Fatal-fault flag: set when the controller is unusable; the bridge halts. */
 static BOOLEAN g_xhci_fatal;
 
+/* The XHCI controller register block. Global (not stack-local) so it lives in
+ * the bridge's data section (the reserved/runtime region), NOT on the AP's
+ * stack. The AP stack is UEFI-managed memory that EDK2 can reclaim/corrupt
+ * (filling it with its freed-memory pattern 0xAFAFAFAF), which previously
+ * poisoned the struct's cap/op/doorbell/rt pointers and caused a #GP in
+ * xhci_read32. A global survives in the preserved runtime region. */
+static XHCI g_xhci;
+
 /* Debugging model: a structured fault record (see xhci_fault.h) that records
  * WHICH bring-up stage failed, WHAT the controller reported, and WHAT the
  * bridge was doing. Published in the reserved region so the Layer 1 harness
@@ -674,7 +682,6 @@ xhci_poll_transfer_event(XHCI *xhci, TRB *out)
 void
 bridge_poll_usb(void)
 {
-    XHCI xhci;
     const USB_TOPOLOGY *topo;
     TRB evt;
     UINT64 trb_ptr;
@@ -690,7 +697,7 @@ bridge_poll_usb(void)
         return;
     }
 
-    xhci_init(&xhci, topo);
+    xhci_init(&g_xhci, topo);
 
     /* Publish the fault record once so the harness can read it after a halt. */
     xhci_fault_publish_rec();
@@ -699,50 +706,50 @@ bridge_poll_usb(void)
      * harness can report exactly where the UEFI->XHCI handoff failed. */
     if (!g_xhci_initialized) {
         /* Belt-and-suspenders XHCI >= 1.0 check (C6). */
-        if (!xhci_verify_version(&xhci)) {
-            xhci_fault(&xhci, XHCI_STAGE_VERIFY, XHCI_FAULT_HINT_VERIFY);
+        if (!xhci_verify_version(&g_xhci)) {
+            xhci_fault(&g_xhci, XHCI_STAGE_VERIFY, XHCI_FAULT_HINT_VERIFY);
             return;
         }
 
-        if (!xhci_reset(&xhci)) {
-            xhci_fault(&xhci, XHCI_STAGE_RESET, XHCI_FAULT_HINT_RESET_TIMEOUT);
+        if (!xhci_reset(&g_xhci)) {
+            xhci_fault(&g_xhci, XHCI_STAGE_RESET, XHCI_FAULT_HINT_RESET_TIMEOUT);
             return;
         }
 
-        if (!xhci_setup_rings(&xhci)) {
-            xhci_fault(&xhci, XHCI_STAGE_RINGS, XHCI_FAULT_HINT_RING_SETUP);
+        if (!xhci_setup_rings(&g_xhci)) {
+            xhci_fault(&g_xhci, XHCI_STAGE_RINGS, XHCI_FAULT_HINT_RING_SETUP);
             return;
         }
 
-        xhci_setup_devices(&xhci, topo);
+        xhci_setup_devices(&g_xhci, topo);
 
         /* Set up the transfer rings. */
         transfer_ring_init(&g_tr_kbd, g_kbd_buf, HID_KBD_REPORT_SIZE);
         transfer_ring_init(&g_tr_mouse, g_mouse_buf, HID_MOUSE_REPORT_SIZE);
 
         /* Start the controller (RUN). */
-        xhci_write32(&xhci.op[XHCI_OP_USBCMD / 4], USBCMD_RUN);
-        if (!xhci_wait_bit_clear(&xhci.op[XHCI_OP_USBSTS / 4], USBSTS_HCH,
+        xhci_write32(&g_xhci.op[XHCI_OP_USBCMD / 4], USBCMD_RUN);
+        if (!xhci_wait_bit_clear(&g_xhci.op[XHCI_OP_USBSTS / 4], USBSTS_HCH,
                                  1000000)) {
-            xhci_fault(&xhci, XHCI_STAGE_RUN, XHCI_FAULT_HINT_RUN);
+            xhci_fault(&g_xhci, XHCI_STAGE_RUN, XHCI_FAULT_HINT_RUN);
             return;
         }
 
         /* Ring the doorbells to start the periodic IN transfers. */
-        xhci_ring_endpoint_doorbell(&xhci, topo->kbd.endpoint, 1);
-        xhci_ring_endpoint_doorbell(&xhci, topo->mouse.endpoint, 2);
+        xhci_ring_endpoint_doorbell(&g_xhci, topo->kbd.endpoint, 1);
+        xhci_ring_endpoint_doorbell(&g_xhci, topo->mouse.endpoint, 2);
         g_xhci_fault_rec.doorbell = 2 * (topo->mouse.endpoint & 0x0F) + 1;
 
         g_xhci_initialized = TRUE;
 
 #ifdef BRIDGE_DEBUG
         /* Debug builds: record the actual hardware state for the harness. */
-        xhci_status_record(&xhci, topo);
+        xhci_status_record(&g_xhci, topo);
 #endif
     }
 
     /* Poll the event ring for completed transfers. */
-    while (xhci_poll_transfer_event(&xhci, &evt)) {
+    while (xhci_poll_transfer_event(&g_xhci, &evt)) {
         cc = (evt.field3 >> 24) & 0xFF;
         g_xhci_fault_rec.last_cc       = cc;
         g_xhci_fault_rec.last_trb_type = (evt.field3 >> 6) & 0x3F;
@@ -770,7 +777,7 @@ bridge_poll_usb(void)
 
             /* Re-arm the transfer ring and ring the doorbell so the next
              * periodic IN transfer is scheduled. */
-            xhci_rearm_transfer(&xhci, &g_tr_kbd, topo->kbd.endpoint, 1);
+            xhci_rearm_transfer(&g_xhci, &g_tr_kbd, topo->kbd.endpoint, 1);
         } else if (trb_ptr == (UINT64)(UINTN)g_tr_mouse.trbs) {
             g_raw_mouse.buttons = g_mouse_buf[0];
             g_raw_mouse.dx      = (INT8)g_mouse_buf[1];
@@ -779,7 +786,7 @@ bridge_poll_usb(void)
 
             /* Re-arm the transfer ring and ring the doorbell so the next
              * periodic IN transfer is scheduled. */
-            xhci_rearm_transfer(&xhci, &g_tr_mouse, topo->mouse.endpoint, 2);
+            xhci_rearm_transfer(&g_xhci, &g_tr_mouse, topo->mouse.endpoint, 2);
         }
     }
 }

@@ -98,10 +98,11 @@ allocate_reserved_pages_high(UINTN pages, EFI_PHYSICAL_ADDRESS *out)
 
     /* Allocate the reserved pages at the highest address below the top of
      * conventional memory. This places them above the OS's physical memory
-     * space. */
+     * space. EfiRuntimeServicesData (not EfiReservedMemoryType) so the
+     * firmware strictly preserves the region after ExitBootServices. */
     *out = highest_end;
     status = uefi_call_wrapper(
-        BS->AllocatePages, 4, AllocateMaxAddress, EfiReservedMemoryType,
+        BS->AllocatePages, 4, AllocateMaxAddress, EfiRuntimeServicesData,
         pages, out);
     return status;
 }
@@ -118,7 +119,8 @@ uefi_reserve_memory(void)
     /* 1. Reserve the fixed virtual 8042 port region page. The virtual port
      *    lives at the fixed address VIRTUAL_PS2_BASE (0x10000030) so the OS's
      *    PS/2 driver can reference it directly. Mark the containing page
-     *    EFI_RESERVED_MEMORY_TYPE so the OS never allocates over it.
+     *    EfiRuntimeServicesData so the firmware strictly preserves it after
+     *    ExitBootServices (the OS never allocates over it).
      *
      *    NOTE: BS->AllocatePages with AllocateAddress requires the address to
      *    be page-aligned (4 KiB). VIRTUAL_PS2_BASE (0x10000030) is NOT
@@ -127,7 +129,7 @@ uefi_reserve_memory(void)
      *    fixed addresses inside that reserved page. */
     vp_addr = VIRTUAL_PS2_BASE & ~(EFI_PHYSICAL_ADDRESS)0xFFF;
     status = uefi_call_wrapper(
-        BS->AllocatePages, 4, AllocateAddress, EfiReservedMemoryType, 1, &vp_addr);
+        BS->AllocatePages, 4, AllocateAddress, EfiRuntimeServicesData, 1, &vp_addr);
     if (EFI_ERROR(status))
         return status;
 
