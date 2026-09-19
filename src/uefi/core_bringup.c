@@ -345,6 +345,30 @@ uefi_bringup_highest_core(void)
     if (EFI_ERROR(status))
         return status;
 
+    /* 5a. Ensure the target AP is enabled and idle before starting it.
+     *
+     *     Some OVMF/EDK2 builds report PROCESSOR_ENABLED_BIT set from
+     *     GetProcessorInfo yet keep the AP's internal state at
+     *     CpuStateDisabled (the two are derived from different sources in
+     *     older MpInitLib revisions). StartupThisAPWorker rejects a
+     *     CpuStateDisabled AP with EFI_INVALID_PARAMETER regardless of the
+     *     reported StatusFlag. Calling EnableDisableAP(EnableAP=TRUE) is
+     *     idempotent: it resets the AP to CpuStateIdle (via
+     *     ResetProcessorToIdleState) if it was disabled, and is a no-op if
+     *     it was already enabled. This closes the StatusFlag/state gap so
+     *     StartupThisAP accepts the processor. */
+    status = uefi_call_wrapper(
+        mp->EnableDisableAP, 4, mp, highest_ap, TRUE, NULL);
+#ifdef BRIDGE_DEBUG
+    Print(L"BRIDGE-DBG: EnableDisableAP(bridge AP=%d, enable=1) status=%r\n",
+          highest_ap, status);
+#endif
+    if (EFI_ERROR(status)) {
+        /* Not fatal: the AP may already be enabled. StartupThisAP will
+         * report the definitive result. */
+        status = EFI_SUCCESS;
+    }
+
     g_ap_booted = 0;
     status = uefi_call_wrapper(
         mp->StartupThisAP, 7, mp, bridge_ap_entry, highest_ap,
