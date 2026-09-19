@@ -69,6 +69,12 @@ static UINT64 g_gdt[3] __attribute__((aligned(8)));
  * normal data-section relocation rather than one against a local symbol. */
 UINT64 g_bridge_stack_top;
 
+/* Boot-status flag: set to 1 by the AP as its very first action in 64-bit
+ * long mode, so the BSP can verify the AP actually booted (per the standard
+ * INIT-SIPI-SIPI handshake). Global (not static) so the naked asm's
+ * RIP-relative reference resolves to a normal data-section relocation. */
+volatile UINT8 g_ap_booted = 0;
+
 /* 64-bit AP entry stub (defined below). Forward-declared so install_trampoline
  * can take its address to patch the trampoline's far-jump target. */
 __attribute__((naked)) static void ap_entry64(void);
@@ -311,6 +317,7 @@ __attribute__((naked)) static void
 ap_entry64(void)
 {
     __asm__ __volatile__(
+        "movb $1, g_ap_booted(%%rip)\n\t"     /* signal BSP: in 64-bit mode */
         "movw $0x10, %%ax\n\t"                 /* data selector */
         "movw %%ax, %%ds\n\t"
         "movw %%ax, %%es\n\t"
@@ -440,13 +447,23 @@ uefi_bringup_highest_core(void)
     /* 6. Install the real-mode trampoline at the STARTUP vector. */
     install_trampoline(g_trampoline_addr);
 
-    /* 7. Start the highest core via SIPI.
+    /* 7. Start the highest core via the standard INIT-SIPI-SIPI sequence.
      *
-     * Per the standard x86 multiprocessor convention: send an INIT IPI
-     * (level assert) then a STARTUP IPI with the trampoline's page number.
+     * Per the Intel SDM (Vol 3A, section 8.4.4) and the standard x86
+     * multiprocessor convention: send an INIT IPI (level assert), wait at
+     * least 10 ms for the AP to complete its reset, then send a STARTUP IPI
+     * with the trampoline's page number, wait at least 200 us, and send a
+     * SECOND STARTUP IPI as a reliability measure if the AP has not yet
+     * signaled that it booted (g_ap_booted).
+     *
      * The AP begins executing the trampoline, which switches to long mode
-     * and jumps to ap_entry64(), which loads the bridge stack and calls
-     * bridge_entry() (B5).
+     * and jumps to ap_entry64(), which sets g_ap_booted, loads the bridge
+     * stack, and calls bridge_entry() (B5).
+     *
+     * CRITICAL: the 10 ms delay after INIT is REQUIRED. If the STARTUP IPI
+     * is sent before the AP has finished its INIT reset, the AP may start
+     * executing in an undefined state and triple-fault, which resets the
+     * ENTIRE system (all cores) - the boot loop we observed.
      *
      * ASSUMPTION: the target AP is dormant at this point. We run in the UEFI
      * boot phase (before ExitBootServices); UEFI runs on the BSP and does not
@@ -463,8 +480,18 @@ uefi_bringup_highest_core(void)
      * the UEFI image, which our page tables identity-map and which stays
      * resident, so the AP can execute it. Starting the bridge now lets it
      * publish its status/fault record before we hand off to the OS. */
+    g_ap_booted = 0;
     send_init_ipi(highest_core);
+    uefi_call_wrapper(BS->Stall, 1, 10000);   /* >= 10 ms after INIT */
+
     send_startup_ipi(highest_core, g_trampoline_addr >> 12);
+    uefi_call_wrapper(BS->Stall, 1, 200);     /* >= 200 us */
+
+    if (!g_ap_booted) {
+        /* Second SIPI as a reliability measure (standard MP protocol). */
+        send_startup_ipi(highest_core, g_trampoline_addr >> 12);
+        uefi_call_wrapper(BS->Stall, 1, 1000);
+    }
 
     /* 8. Load the input adapter into the reserved region on core 0 (for
      *    O1/O2). The adapter code is also linked into the image; in a full
