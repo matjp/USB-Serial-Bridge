@@ -425,6 +425,15 @@ extract_xhci_observer(XHCI_OBSERVER *obs)
     obs->event_ring_addr = evt_addr;
     obs->event_ring_size = evt_size;
 
+    /* Capture the controller's current event-ring dequeue pointer (ERDP,
+     * runtime offset 0x38/0x3C). The AP's passive observer starts its own
+     * dequeue index + cycle bit from this value so it reads genuinely-new
+     * events from where UEFI's XhciDxe left off, rather than stale events
+     * (or a cycle-bit mismatch) at index 0. */
+    obs->erdp = ((UINT64)xhci_mmio_read32(mmio, rt_off + 0x3C) << 32) |
+                xhci_mmio_read32(mmio, rt_off + 0x38);
+    Print(L"BRIDGE-DBG: obs: ERDP=%016llX\n", (unsigned long long)obs->erdp);
+
     /* DCBAAP at op offset 0x30 (low), 0x34 (high). */
     dcbaa_addr = ((UINT64)xhci_mmio_read32(mmio, cap_len + 0x34) << 32) |
                  xhci_mmio_read32(mmio, cap_len + 0x30);

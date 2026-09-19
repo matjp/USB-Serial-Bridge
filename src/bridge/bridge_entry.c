@@ -44,6 +44,12 @@ bridge_entry(void)
      * ring/device-context re-creation. */
     const XHCI_OBSERVER *obs = (const XHCI_OBSERVER *)(UINTN)XHCI_OBSERVER_ADDR;
 
+    /* Sync the passive observer's dequeue index + cycle bit to the
+     * controller's current ERDP (captured during extraction). Without
+     * this, the observer starts at index 0 and is out of sync with where
+     * UEFI's XhciDxe left off, so it observes stale events or nothing. */
+    bridge_observer_sync(obs);
+
     for (;;) {
         /* If the USB controller is unusable (non-XHCI>=1.0 or a fatal
          * fault), halt cleanly in an idle loop. */

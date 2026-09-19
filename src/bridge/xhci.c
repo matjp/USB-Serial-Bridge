@@ -935,6 +935,48 @@ bridge_takeover_poll(const XHCI_OBSERVER *obs)
 }
 
 /* ------------------------------------------------------------------ */
+/* bridge_observer_sync(): sync the passive observer's own event-ring
+ * dequeue index + cycle bit to the controller's current ERDP.
+ *
+ * The observer tracks its OWN dequeue index (g_obs_deq) and cycle bit
+ * (g_obs_cycle) in memory only. If it starts at index 0 with cycle 1, it
+ * will be out of sync with the controller: by the time the bridge AP
+ * starts polling, UEFI's XhciDxe has already consumed events and advanced
+ * the controller's ERDP, so the TRB at index 0 is stale (or its cycle bit
+ * no longer matches), and the observer either processes stale events or
+ * gets stuck and observes nothing.
+ *
+ * The BSP captures the controller's current ERDP (obs->erdp) during
+ * extraction. ERDP bit 0 is the "Event Ring Dequeue Pointer Cycle State"
+ * (the cycle state of the TRB the consumer expects to read next), and the
+ * remaining bits are the 16-byte-aligned physical address of that TRB.
+ * We derive our dequeue index + cycle bit from it so the observer starts
+ * reading genuinely-new events from where UEFI left off. */
+void
+bridge_observer_sync(const XHCI_OBSERVER *obs)
+{
+    UINT64 erdp;
+    UINT64 base;
+    UINT64 offset;
+
+    if (obs == NULL || obs->event_ring_addr == 0 || obs->event_ring_size == 0)
+        return;
+
+    erdp = obs->erdp;
+    if (erdp == 0)
+        return;
+
+    /* Cycle state = ERDP bit 0. */
+    g_obs_cycle = (UINT32)(erdp & 1u);
+
+    /* Dequeue index = (ERDP address - event ring base) / 16. */
+    base = obs->event_ring_addr;
+    offset = (erdp & ~(UINT64)0xF) - base;
+    if (offset >= (UINT64)obs->event_ring_size * 16u)
+        return;   /* ERDP not within this event ring; leave defaults */
+    g_obs_deq = (UINT32)(offset / 16u);
+}
+
 /* bridge_observer_poll(): read-only passive observer (pre-EBS).       */
 /*                                                                     */
 /* Before ExitBootServices, the bridge AP must NOT write to the xHCI   */

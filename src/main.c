@@ -48,7 +48,7 @@ uefi_log_bridge_output(void)
     Print(L"BRIDGE-DBG: bridge output bytes (%u): ", n);
     for (i = 0; i < n; i++) {
         UINT32 idx = (tail + i) & (BRIDGE_DEBUG_CAP - 1);
-        Print(L"%02X ", dbg->data[idx]);
+        Print(L"%02X ", (UINT32)(dbg->data[idx] & 0xFFu));
     }
     Print(L"\n");
 

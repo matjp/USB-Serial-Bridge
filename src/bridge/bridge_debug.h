@@ -21,8 +21,8 @@
  *   0x10000018 XHCI_FAULT_PTR_ADDR
  *   0x10000020 XHCI_STATUS_PTR_ADDR
  *   0x10000030 VIRTUAL_PS2_BASE (status +0, data +1)
- *   0x10000040 XHCI_OBSERVER_ADDR
- *   0x10000050 BRIDGE_DEBUG_ADDR   <-- this buffer
+ *   0x10000040 XHCI_OBSERVER_ADDR (XHCI_OBSERVER, 0x40..0x68)
+ *   0x10000080 BRIDGE_DEBUG_ADDR   <-- this buffer (clear of the observer)
  */
 
 #ifndef BRIDGE_DEBUG_H
@@ -30,8 +30,12 @@
 
 #include <efi.h>
 
-/* Fixed physical address of the bridge debug capture region. */
-#define BRIDGE_DEBUG_ADDR   0x10000050ULL
+/* Fixed physical address of the bridge debug capture region. Placed clear
+ * of the XHCI_OBSERVER (0x10000040..0x10000068) and all other reserved
+ * slots. NOTE: this MUST NOT overlap the observer - the AP reads the
+ * observer every poll, so writing the debug capture over it would corrupt
+ * the transfer-ring addresses and break the observer's matching. */
+#define BRIDGE_DEBUG_ADDR   0x10000080ULL
 
 /* Capacity of the captured serial-output ring buffer (bytes). */
 #define BRIDGE_DEBUG_CAP    256
@@ -54,7 +58,7 @@ typedef struct {
  * 8042 data register.
  *
  * Declared WEAK so the host tests can override it with a mock (the fixed
- * address 0x10000050 is unmapped on the host). The default implementation
+ * address 0x10000080 is unmapped on the host). The default implementation
  * (in virtual_ps2_writer.c) writes to the shared-memory ring buffer. */
 __attribute__((weak)) void bridge_debug_capture(UINT8 byte, BOOLEAN is_kbd);
 

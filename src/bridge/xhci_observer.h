@@ -58,6 +58,12 @@ typedef struct {
     UINT64 mouse_tr_addr;     /* UEFI's mouse transfer ring base */
     UINT32 kbd_slot;          /* keyboard device slot number */
     UINT32 mouse_slot;        /* mouse device slot number */
+    UINT64 erdp;              /* controller's current event-ring dequeue
+                               * pointer (runtime ERDP register). The AP
+                               * uses this to sync its own dequeue index +
+                               * cycle bit to where UEFI's XhciDxe left off,
+                               * so it starts reading genuinely-new events
+                               * instead of stale ones at index 0. */
 } XHCI_OBSERVER;
 
 #endif /* XHCI_OBSERVER_H */

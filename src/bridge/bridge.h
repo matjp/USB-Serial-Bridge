@@ -22,6 +22,13 @@ void bridge_poll_usb(void);
  * controller (the BSP's XhciDxe driver owns it before EBS). */
 void bridge_observer_poll(const XHCI_OBSERVER *obs);
 
+/* B1: Sync the passive observer's own event-ring dequeue index + cycle
+ * bit to the controller's current ERDP (captured in obs->erdp during
+ * extraction). Call once before the first bridge_observer_poll so the
+ * observer starts reading genuinely-new events from where UEFI's XhciDxe
+ * left off, instead of stale events (or a cycle-bit mismatch) at index 0. */
+void bridge_observer_sync(const XHCI_OBSERVER *obs);
+
 /* B1: True takeover of UEFI's xHCI rings (post-ExitBootServices). The AP
  * is now the sole owner: it continues polling UEFI's event ring and now
  * also writes ERDP + re-arms the transfer rings + rings the doorbells.
