@@ -36,10 +36,12 @@
 #define ICR_STARTUP            0x00000600
 
 /* Real-mode address where the AP trampoline is copied and executed. The
- * STARTUP IPI vector is the page number of this address. 0x8000 is the
- * conventional AP-startup location in the low 640 KB. */
-#define TRAMPOLINE_ADDR        0x8000
-#define STARTUP_VECTOR         (TRAMPOLINE_ADDR >> 12)   /* 0x08 */
+ * STARTUP IPI vector is the page number of this address. This is NOT a
+ * hardcoded constant: a fixed low address like 0x8000 may already be
+ * occupied by UEFI firmware data on real hardware, so we find a genuinely
+ * free page below 1 MB from the EFI memory map at runtime (see
+ * find_trampoline_addr). 0x8000 is only the fallback default. */
+static UINT32 g_trampoline_addr = 0x8000;
 
 /* Bridge core stack size (bytes), allocated in the reserved region. */
 #define BRIDGE_STACK_SIZE      0x4000   /* 16 KiB */
@@ -265,9 +267,9 @@ put_le32(UINT8 *p, UINT32 v)
 /* Copy the trampoline to TRAMPOLINE_ADDR and patch its data area and
  * immediates with the GDT pointer, CR3 (PML4 base), and 64-bit entry. */
 static void
-install_trampoline(void)
+install_trampoline(UINT32 trampoline_addr)
 {
-    UINT8 *tramp = (UINT8 *)(UINTN)TRAMPOLINE_ADDR;
+    UINT8 *tramp = (UINT8 *)(UINTN)trampoline_addr;
     UINT64 gdt_base = (UINT64)(UINTN)g_gdt;
     UINT16 gdt_limit = (UINT16)(sizeof(g_gdt) - 1);
     UINT64 cr3 = (UINT64)(UINTN)g_pml4;
@@ -321,6 +323,76 @@ ap_entry64(void)
         ::: "memory");
 }
 
+/* Find a free, page-aligned physical address below 1 MB for the AP
+ * trampoline, by walking the EFI memory map for a conventional-memory
+ * (usable RAM) region in the safe real-mode range [0x8000, 0x9F000).
+ * The STARTUP IPI vector can only address the first 1 MB, and a hardcoded
+ * low address may collide with UEFI firmware data, so we pick a genuinely
+ * free page. Returns 0 if none is found (caller falls back to 0x8000). */
+static UINT32
+find_trampoline_addr(void)
+{
+    EFI_STATUS status;
+    UINTN map_size = 0;
+    UINTN map_key = 0;
+    UINTN desc_size = 0;
+    UINT32 desc_version = 0;
+    EFI_MEMORY_DESCRIPTOR *map = NULL;
+    EFI_MEMORY_DESCRIPTOR *desc;
+    UINTN count, i;
+    UINT64 start, end, aligned;
+    UINT32 addr = 0;
+
+    /* First call returns the required buffer size. */
+    status = uefi_call_wrapper(
+        BS->GetMemoryMap, 5, &map_size, NULL, &map_key, &desc_size, &desc_version);
+    if (status != EFI_BUFFER_TOO_SMALL)
+        return 0;
+
+    /* Allocate a scratch buffer for the map. */
+    map_size += desc_size * 4;
+    status = uefi_call_wrapper(BS->AllocatePool, 2, EfiBootServicesData, map_size,
+                               (VOID **)&map);
+    if (EFI_ERROR(status))
+        return 0;
+
+    status = uefi_call_wrapper(
+        BS->GetMemoryMap, 5, &map_size, map, &map_key, &desc_size, &desc_version);
+    if (EFI_ERROR(status)) {
+        FreePool(map);
+        return 0;
+    }
+
+    /* Find the first conventional-memory page in the safe range. */
+    count = map_size / desc_size;
+    for (i = 0; i < count; i++) {
+        desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)map + i * desc_size);
+        if (desc->Type != EfiConventionalMemory)
+            continue;
+
+        start = desc->PhysicalStart;
+        end = start + (desc->NumberOfPages << 12);
+
+        /* Clip to the safe real-mode range [0x8000, 0x9F000). */
+        if (end <= 0x8000ULL || start >= 0x9F000ULL)
+            continue;
+        if (start < 0x8000ULL)
+            start = 0x8000ULL;
+        if (end > 0x9F000ULL)
+            end = 0x9F000ULL;
+
+        /* Page-align the start; require a full free page. */
+        aligned = (start + 0xFFF) & ~0xFFFULL;
+        if (aligned + 0x1000 <= end) {
+            addr = (UINT32)aligned;
+            break;
+        }
+    }
+
+    FreePool(map);
+    return addr;
+}
+
 /* ------------------------------------------------------------------ */
 /* uefi_bringup_highest_core(): determine core count, set up the        */
 /* highest core's GDT/stack/page tables, load the bridge code, and      */
@@ -354,10 +426,21 @@ uefi_bringup_highest_core(void)
     setup_page_tables();
     setup_gdt();
 
-    /* 5. Install the real-mode trampoline at the STARTUP vector. */
-    install_trampoline();
+    /* 5. Find a free page below 1 MB for the real-mode trampoline. The
+     *    STARTUP IPI vector can only address the first 1 MB, and a hardcoded
+     *    low address (0x8000) may collide with UEFI firmware data on real
+     *    hardware, so we pick a genuinely free page from the EFI memory map.
+     *    Fall back to 0x8000 if nothing usable is found. */
+    {
+        UINT32 tramp_addr = find_trampoline_addr();
+        if (tramp_addr != 0)
+            g_trampoline_addr = tramp_addr;
+    }
 
-    /* 6. Start the highest core via SIPI.
+    /* 6. Install the real-mode trampoline at the STARTUP vector. */
+    install_trampoline(g_trampoline_addr);
+
+    /* 7. Start the highest core via SIPI.
      *
      * Per the standard x86 multiprocessor convention: send an INIT IPI
      * (level assert) then a STARTUP IPI with the trampoline's page number.
@@ -381,9 +464,9 @@ uefi_bringup_highest_core(void)
      * resident, so the AP can execute it. Starting the bridge now lets it
      * publish its status/fault record before we hand off to the OS. */
     send_init_ipi(highest_core);
-    send_startup_ipi(highest_core, STARTUP_VECTOR);
+    send_startup_ipi(highest_core, g_trampoline_addr >> 12);
 
-    /* 7. Load the input adapter into the reserved region on core 0 (for
+    /* 8. Load the input adapter into the reserved region on core 0 (for
      *    O1/O2). The adapter code is also linked into the image; in a full
      *    implementation it is copied to a reserved region on core 0. This
      *    is deferred to the OS-integration phase. */
