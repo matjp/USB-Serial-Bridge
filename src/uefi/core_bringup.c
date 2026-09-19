@@ -187,6 +187,25 @@ UINT64 g_bridge_stack_top;
 volatile UINT8 g_ap_booted = 0;
 
 /* ------------------------------------------------------------------ */
+/* No-op event notification function.                                   */
+/*                                                                     */
+/* EDK2's CoreCreateEventInternal rejects a NULL NotifyFunction for    */
+/* EVT_NOTIFY_WAIT / EVT_NOTIFY_SIGNAL events with EFI_INVALID_PARAMETER*/
+/* (MdeModulePkg/Core/Dxe/Event/Event.c). We create an EVT_NOTIFY_WAIT  */
+/* event only to obtain a valid EFI_EVENT handle to pass as the         */
+/* WaitEvent argument to StartupThisAP (a non-NULL WaitEvent makes it   */
+/* return immediately after dispatching the AP). We never actually wait */
+/* on the event, so the notification function is never invoked; a no-op */
+/* satisfies the non-NULL requirement. This mirrors EDK2's own          */
+/* EfiEventEmptyFunction().                                             */
+/* ------------------------------------------------------------------ */
+static VOID EFIAPI
+bridge_ap_done_notify(EFI_EVENT event, VOID *context)
+{
+    (VOID)event;
+    (VOID)context;
+}
+
 /* AP procedure.                                                       */
 /*                                                                     */
 /* Runs on the bridge core in its native environment (long mode, UEFI   */
@@ -340,7 +359,12 @@ uefi_bringup_highest_core(void)
      *    (which never happens here, and we never wait on it). We then verify
      *    the AP actually started via the g_ap_booted handshake. */
     status = uefi_call_wrapper(
-        BS->CreateEvent, 5, EVT_NOTIFY_WAIT, TPL_NOTIFY, NULL, NULL,
+        BS->CreateEvent, 5, EVT_NOTIFY_WAIT, TPL_NOTIFY,
+        bridge_ap_done_notify,  /* NotifyFunction: MUST be non-NULL for
+                                 * EVT_NOTIFY_WAIT, else EDK2 returns
+                                 * EFI_INVALID_PARAMETER. Never invoked
+                                 * (we never wait on the event). */
+        NULL,                   /* NotifyContext */
         &ap_done_event);
     if (EFI_ERROR(status))
         return status;
