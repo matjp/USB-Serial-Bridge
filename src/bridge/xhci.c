@@ -26,7 +26,6 @@
 #include "usb_topology.h"
 #include "xhci_fault.h"
 #include "xhci_status.h"
-#include "bridge_debug.h"
 
 /* Freestanding firmware: <efi.h> does not pull in <string.h>. Declare the
  * libc memset we use to clear the fault record (host build provides it). */
@@ -687,58 +686,31 @@ bridge_poll_usb(void)
 
     topo = usb_topology_get();
     if (topo == NULL) {
-#ifdef BRIDGE_DEBUG
-        bridge_debug_puts((const CHAR8 *)"XHCI poll: topology NULL (fatal)");
-#endif
         xhci_fault(NULL, XHCI_STAGE_NONE, XHCI_FAULT_HINT_NONE);
         return;
     }
 
-#ifdef BRIDGE_DEBUG
-    bridge_debug_puts((const CHAR8 *)"XHCI poll: topology OK, init");
-#endif
     xhci_init(&xhci, topo);
 
     /* Publish the fault record once so the harness can read it after a halt. */
     xhci_fault_publish_rec();
-#ifdef BRIDGE_DEBUG
-    bridge_debug_puts((const CHAR8 *)"XHCI poll: fault rec published");
-#endif
 
     /* One-time controller bring-up. Each stage records its own fault so the
      * harness can report exactly where the UEFI->XHCI handoff failed. */
     if (!g_xhci_initialized) {
-#ifdef BRIDGE_DEBUG
-        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: verify");
-#endif
         /* Belt-and-suspenders XHCI >= 1.0 check (C6). */
         if (!xhci_verify_version(&xhci)) {
             xhci_fault(&xhci, XHCI_STAGE_VERIFY, XHCI_FAULT_HINT_VERIFY);
-#ifdef BRIDGE_DEBUG
-            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: verify (spec < 1.0)");
-#endif
             return;
         }
 
-#ifdef BRIDGE_DEBUG
-        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: reset");
-#endif
         if (!xhci_reset(&xhci)) {
             xhci_fault(&xhci, XHCI_STAGE_RESET, XHCI_FAULT_HINT_RESET_TIMEOUT);
-#ifdef BRIDGE_DEBUG
-            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: reset timeout");
-#endif
             return;
         }
 
-#ifdef BRIDGE_DEBUG
-        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: rings");
-#endif
         if (!xhci_setup_rings(&xhci)) {
             xhci_fault(&xhci, XHCI_STAGE_RINGS, XHCI_FAULT_HINT_RING_SETUP);
-#ifdef BRIDGE_DEBUG
-            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: ring setup");
-#endif
             return;
         }
 
@@ -753,9 +725,6 @@ bridge_poll_usb(void)
         if (!xhci_wait_bit_clear(&xhci.op[XHCI_OP_USBSTS / 4], USBSTS_HCH,
                                  1000000)) {
             xhci_fault(&xhci, XHCI_STAGE_RUN, XHCI_FAULT_HINT_RUN);
-#ifdef BRIDGE_DEBUG
-            bridge_debug_puts((const CHAR8 *)"XHCI FAIL: RUN (HCH not cleared)");
-#endif
             return;
         }
 
@@ -769,7 +738,6 @@ bridge_poll_usb(void)
 #ifdef BRIDGE_DEBUG
         /* Debug builds: record the actual hardware state for the harness. */
         xhci_status_record(&xhci, topo);
-        bridge_debug_puts((const CHAR8 *)"XHCI bring-up: OK (RUN set, doorbells rung)");
 #endif
     }
 

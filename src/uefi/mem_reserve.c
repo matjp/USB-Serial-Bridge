@@ -17,7 +17,6 @@
 #include <virtual_ps2.h>
 #include "uefi.h"
 #include "../bridge/usb_topology.h"
-#include "../bridge/bridge_debug.h"
 
 /* The discovered topology, filled by U1 (usb_discovery.c). U3 copies it
  * into the reserved region and publishes its address for B1. */
@@ -147,14 +146,6 @@ uefi_reserve_memory(void)
         for (j = 0; j < 0x1000; j++)
             p[j] = 0;
     }
-
-#ifdef BRIDGE_DEBUG
-    /* Initialize the virtual debug serial ring buffer (debug builds only).
-     * The reserved page was just zeroed; stamp the magic and zero the line
-     * slots so the bridge can write diagnostic lines that the BSP harness
-     * (and later the OS) can read. */
-    bridge_debug_init();
-#endif
 
     /* 2. Allocate + reserve the bridge code region (high-placed). */
     status = allocate_reserved_pages_high(BRIDGE_REGION_PAGES, &bridge_addr);

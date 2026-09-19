@@ -19,26 +19,14 @@
 
 #include "bridge.h"
 #include "tdm.h"
-#include "bridge_debug.h"
 
 void
 bridge_entry(void)
 {
-#ifdef BRIDGE_DEBUG
-    /* Persistent virtual debug serial: mark that the bridge AP is alive and
-     * entered its main loop. This is the first thing the BSP harness (and
-     * later the OS) looks for to confirm the AP is actually executing the
-     * bridge code. */
-    bridge_debug_puts((const CHAR8 *)"BRIDGE AP ALIVE: bridge_entry entered");
-#endif
-
     for (;;) {
         /* If the USB controller is unusable (non-XHCI>=1.0 or a fatal
          * fault), halt cleanly in an idle loop. */
         if (bridge_usb_fatal()) {
-#ifdef BRIDGE_DEBUG
-            bridge_debug_puts((const CHAR8 *)"BRIDGE FATAL: halting in idle loop");
-#endif
             for (;;)
                 __asm__ __volatile__("hlt");
         }

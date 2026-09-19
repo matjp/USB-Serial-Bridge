@@ -81,15 +81,6 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         goto done;
     }
 
-#ifdef BRIDGE_DEBUG
-    /* Dump the bridge's virtual debug serial EARLY, right after bring-up, so
-     * we can see how far the AP got through bridge_entry()/XHCI bring-up even
-     * if the BSP hangs later (e.g. when the AP's XHCI reset disrupts the BSP's
-     * UEFI environment). */
-    Print(L"BRIDGE-DBG: early dump of bridge virtual debug serial\n");
-    dump_bridge_debug();
-#endif
-
     /* Layer 1 harness: if the bridge faulted during XHCI bring-up, print a
      * one-screen diagnosis to the console and halt - never boot the OS. */
     Print(L"BRIDGE-DBG: calling uefi_check_bridge_fault\n");

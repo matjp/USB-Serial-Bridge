@@ -29,7 +29,6 @@
 #include "uefi.h"
 #include "../bridge/bridge.h"
 #include "../bridge/usb_topology.h"
-#include "../bridge/bridge_debug.h"
 
 /* ------------------------------------------------------------------ */
 /* EFI_MP_SERVICES_PROTOCOL (portability shim).                        */
@@ -295,10 +294,6 @@ bridge_ap_detach(void)
      *    interfere with the BSP's UEFI environment. */
     __asm__ __volatile__("cli" : : : "memory");
 
-#ifdef BRIDGE_DEBUG
-    bridge_debug_puts((const CHAR8 *)"AP DETACH: disabling interrupts");
-#endif
-
     /* 2. Allocate page-aligned memory for the independent page tables
      *    (8 pages = 32 KiB). EfiReservedMemoryType so the OS never reclaims
      *    them after ExitBootServices. */
@@ -306,9 +301,6 @@ bridge_ap_detach(void)
         BS->AllocatePages, 4, AllocateAnyPages, EfiReservedMemoryType,
         8, &pt_addr);
     if (EFI_ERROR(status)) {
-#ifdef BRIDGE_DEBUG
-        bridge_debug_puts((const CHAR8 *)"AP DETACH: AllocatePages failed");
-#endif
         return;   /* Cannot detach; bridge_entry runs under UEFI's tables. */
     }
     pt = (AP_PAGE_TABLES *)(UINTN)pt_addr;
@@ -337,10 +329,6 @@ bridge_ap_detach(void)
      *    instruction fetch and data access use the independent tables. */
     __asm__ __volatile__("movq %0, %%cr3" : : "r"((UINT64)(UINTN)pt)
                          : "memory");
-
-#ifdef BRIDGE_DEBUG
-    bridge_debug_puts((const CHAR8 *)"AP DETACH: CR3 switched, detached");
-#endif
 }
 
 /* AP procedure.                                                       */
@@ -557,12 +545,6 @@ uefi_bringup_highest_core(void)
     Print(L"BRIDGE-DBG: AP boot status: g_ap_booted=%d (bridge AP=%d, "
           L"StartupThisAP status=%r)\n",
           g_ap_booted, highest_ap, status);
-
-    /* Dump the bridge's virtual debug serial right here, before returning.
-     * The BSP may hang shortly after (e.g. when the AP's XHCI reset disrupts
-     * the BSP's UEFI environment), so capture the AP's progress now. */
-    Print(L"BRIDGE-DBG: dumping bridge virtual debug serial (early)\n");
-    dump_bridge_debug();
 #endif
 
     if (EFI_ERROR(status) || !g_ap_booted)
